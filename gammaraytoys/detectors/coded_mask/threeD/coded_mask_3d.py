@@ -130,17 +130,17 @@ class ToyCodedMaskDetector3D:
             # Middle bins. Full
             for det_bin,width in zip(range(det_bin_i+1, det_bin_f),
                                      det_axis.widths[det_bin_i+1: det_bin_f]):
-                mask_bins_weights[det_bin] += [(mask_bin, width)]
+                mask_bins_weights[det_bin] += [(mask_bin, width.value)]
             
             # Lower edge
             if det_bin_i >= 0:
                 upper_bound = det_axis.upper_bounds[det_bin_i]
-                mask_bins_weights[det_bin_i] += [(mask_bin, upper_bound - mask_proj_edges[mask_bin])]
+                mask_bins_weights[det_bin_i] += [(mask_bin, (upper_bound - mask_proj_edges[mask_bin]).value)]
             
             # Upper edge
             if det_bin_f < det_axis.nbins:
                 lower_bound = det_axis.lower_bounds[det_bin_f]
-                mask_bins_weights[det_bin_f] += [(mask_bin, mask_proj_edges[mask_bin+1] - lower_bound)]
+                mask_bins_weights[det_bin_f] += [(mask_bin, (mask_proj_edges[mask_bin+1] - lower_bound).value)]
 
         return mask_bins_weights
                 
@@ -154,28 +154,31 @@ class ToyCodedMaskDetector3D:
         lat = coord.lat.to_value(u.rad)
 
         # Init expectation to 0
-        # Will remove units when multiplying by flux and duration
-        expectation = Histogram(self._det_axes,
-                                unit = 1/flux.unit/duration.unit)
+        # Faster without units, we'll get them later
+        expectation = np.zeros(self._det_axes.nbins)
 
         # Coded mask projection edges
-        right_edge =  self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation
-        left_edge =   self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation
-        top_edge =    self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation
-        bottom_edge = self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation
+        right_edge =  (self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation).value
+        left_edge =   (self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation).value
+        top_edge =    (self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation).value
+        bottom_edge = (self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation).value
         
         # Get geometrical weight along each axis
         mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
         mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
 
+        # Cache for speed
+        mask = self.mask.contents
+        
         # Loop through all x,y weights combinations
-        for det_bin_x,(det_bin_left, det_bin_right) in tqdm(enumerate(zip(expectation.axes[0].lower_bounds, expectation.axes[0].upper_bounds)), total = expectation.axes[0].nbins):
-            for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(expectation.axes[1].lower_bounds, expectation.axes[1].upper_bounds)):
+        for det_bin_x,(det_bin_left, det_bin_right) in tqdm(enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)),
+                                                            total = self.detector_axes[0].nbins):
+            for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(self.detector_axes[1].lower_bounds.value, self.detector_axes[1].upper_bounds.value)):
 
                 # From mask
                 for mask_bin_x, geom_weight_x in mask_bin_weights_x[det_bin_x]:
                     for mask_bin_y, geom_weight_y in mask_bin_weights_y[det_bin_y]:
-                        expectation[det_bin_x, det_bin_y] += self.mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
+                        expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
 
                 # Outside mask, through shielding
                 shield_leak = 1-self.shielding
@@ -192,15 +195,13 @@ class ToyCodedMaskDetector3D:
                 
                 expectation[det_bin_x, det_bin_y] += shield_leak
                         
-        # Weight by exposure
+        # Weight by exposure and
         off_axis_angle = np.arccos(coord.to_cartesian().x)
         
-        expectation *= flux * duration * np.cos(off_axis_angle) * self._det_eff
-
-        expectation.clear_underflow_and_overflow()
+        expectation = expectation * self._det_axes['x'].unit * self._det_axes['y'].unit * flux * duration * np.cos(off_axis_angle) * self._det_eff
 
         # Convert Quantity to np array (it should be already unitless)
-        expectation = Histogram(expectation.axes, expectation.contents.to('').value)
+        expectation = Histogram(self.detector_axes, expectation.to('').value)
         
         if fluctuate:
             expectation[:] = poisson.rvs(mu = expectation.contents)
