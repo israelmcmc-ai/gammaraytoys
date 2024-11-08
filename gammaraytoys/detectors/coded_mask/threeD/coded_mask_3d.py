@@ -111,8 +111,6 @@ class ToyCodedMaskDetector3D:
         return u.Quantity([np.arctan((self.mask_size[0]/2-self.detector_size[0]/2)/self.mask_separation),
                            np.arctan((self.mask_size[0]/2-self.detector_size[0]/2)/self.mask_separation)])
 
-    # ======== Tested in 3D above this line ======
-
     def _get_mask_axis_geom_weights(self, det_axis, mask_axis, angle):
 
         mask_proj_edges = mask_axis.edges - self._mask_sep * np.tan(angle)
@@ -143,7 +141,7 @@ class ToyCodedMaskDetector3D:
                 mask_bins_weights[det_bin_f] += [(mask_bin, (mask_proj_edges[mask_bin+1] - lower_bound).value)]
 
         return mask_bins_weights
-                
+
     @u.quantity_input(flux = u.Unit()/u.m/u.m/u.s, duration = u.s, angle = u.rad)
     def point_source_response(self, flux, duration, coord, fluctuate = False):
 
@@ -171,8 +169,7 @@ class ToyCodedMaskDetector3D:
         mask = self.mask.contents
         
         # Loop through all x,y weights combinations
-        for det_bin_x,(det_bin_left, det_bin_right) in tqdm(enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)),
-                                                            total = self.detector_axes[0].nbins):
+        for det_bin_x,(det_bin_left, det_bin_right) in enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)):
             for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(self.detector_axes[1].lower_bounds.value, self.detector_axes[1].upper_bounds.value)):
 
                 # From mask
@@ -208,40 +205,134 @@ class ToyCodedMaskDetector3D:
         
         return expectation
 
-    
-    # ======== 2D bwlow this line =======
-
-    
     @property
     def response(self):
         if self._response is None:
             # Compute and cache
 
-            flux = 1/u.cm/u.s
+            flux = 1/u.cm/u.cm/u.s
             duration = 1*u.s
             
-            response = Histogram.concatenate(self.sky_axis,
-                                             [self.point_source_response(flux = flux,
-                                                                         angle = a,
-                                                                         duration = duration,
-                                                                         fluctuate = False)
-                                              for a in self.sky_axis.centers])
-            
-            response = response.project(1,0) # Transpose
+            response = Histogram(list(self.sky_axes) + list(self.detector_axes),
+                                 track_overflow = False)
 
-            # Give correct area units
-            response = Histogram(response.axes, response.contents/flux/duration)
+            for nLon, lon in tqdm(enumerate(self.sky_axes[0].centers), total = self.sky_axes[0].nbins):
+                for nLat, lat in enumerate(self.sky_axes[1].centers):
+
+                    coord = UnitSphericalRepresentation(lon = lon, lat = lat)
+
+                    response[nLon, nLat] = self.point_source_response(flux = flux,
+                                                                      coord = coord,
+                                                                      duration = duration,
+                                                                      fluctuate = False).contents
+                                
+            # Normalize and given area units
+            response /= flux*duration
 
             self._response = response
                             
         return self._response
 
-    def effective_area(self, angle):
-
-        if np.abs(angle > self.fully_coded_fov):
-            return 0*u.cm
+    def effective_area(self, coord):
         
-        return np.sum(self.response[:, self.sky_axis.find_bin(angle)])
+        # Standarize coordinate
+        coord = coord.represent_as(UnitSphericalRepresentation)
+        
+        if (np.abs(coord.lon) > self.fully_coded_fov[0]) or (np.abs(coord.lon) > self.fully_coded_fov[1]) :
+            return 0*u.cm
+
+        # TODO: obtain from 
+        if self._response is not None:
+            # From cache
+            psr = self.response[*self.response.axes['lon','lat'].find_bin(coord.lon, coord.lat)]
+        else:
+            # On the fly
+            psr = self.point_source_response(flux = 1/u.cm/u.cm/u.s,
+                                             coord = coord,
+                                             duration = 1*u.s,
+                                             fluctuate = False)
+        
+        return np.sum(psr) * u.cm * u.cm
+    
+
+    
+    @u.quantity_input(flux = u.Unit()/u.cm/u.cm/u.s, angle = u.rad, width = u.rad)
+    def gaussian_model(self, flux, coord, width_lon, width_lat, max_sigma = 3):
+        """
+        0 beyond max_sigma
+        """
+
+        flux = 1/u.cm/u.cm/u.s
+        coord = UnitSphericalRepresentation(lon = 0*u.deg, lat = 0*u.deg)
+        width_lon = 10*u.arcmin
+        width_lat = 10*u.arcmin
+
+        width_lon = np.maximum(self.angular_resolution/1e6, width_lon)
+        width_lat = np.maximum(self.angular_resolution/1e6, width_lat)
+
+        model = Histogram(self.sky_axes, unit = flux.unit) 
+
+        from scipy.stats import multivariate_normal
+        from scipy.integrate import dblquad
+
+        dist = multivariate_normal(mean = [coord.lon.to_value(u.rad), coord.lon.to_value(u.rad)],
+                                   cov = [[width_lon.to_value(u.rad)**2,0],[0,width_lat.to_value(u.rad)**2]])
+
+        # Mask at 3 sigma for speed
+        nLon_list = np.arange(self.sky_axes['lon'].nbins)
+        lon_lower_bounds = self.sky_axes['lon'].lower_bounds 
+        lon_centers = self.sky_axes['lon'].centers
+        lon_upper_bounds = self.sky_axes['lon'].upper_bounds
+
+        lon_mask = (lon_lower_bounds - coord.lon < max_sigma*width_lon) & (coord.lon - lon_upper_bounds < max_sigma*width_lon)
+        nLon_list = nLon_list[lon_mask]
+        lon_lower_bounds = lon_lower_bounds[lon_mask]
+        lon_centers = lon_centers[lon_mask]
+        lon_upper_bounds = lon_upper_bounds[lon_mask]
+
+        nLat_list = np.arange(self.sky_axes['lat'].nbins)
+        lat_lower_bounds = self.sky_axes['lat'].lower_bounds 
+        lat_centers = self.sky_axes['lat'].centers 
+        lat_upper_bounds = self.sky_axes['lat'].upper_bounds
+
+        lat_mask = (lat_lower_bounds - coord.lat < max_sigma*width_lat) & (coord.lat - lat_upper_bounds < max_sigma*width_lat)
+        nLat_list = nLat_list[lat_mask]
+        lat_lower_bounds = lat_lower_bounds[lat_mask]
+        lat_centers = lat_centers[lat_mask]
+        lat_upper_bounds = lat_upper_bounds[lat_mask]
+
+        for nLon,lon_i, lon_c, lon_f in zip(nLon_list, lon_lower_bounds, lon_centers, lon_upper_bounds):
+            for nLat,lat_i, lat_c, lat_f in zip(nLat_list, lat_lower_bounds, lat_centers, lat_upper_bounds):
+                
+                # The main purpose of this line is to make dblquadis work if the width is tiny
+                upper_lon = np.minimum(lon_f, coord.lon + max_sigma*width_lon)
+                lower_lon = np.maximum(lon_i, coord.lon - max_sigma*width_lon)
+                upper_lat = np.minimum(lat_f, coord.lat + max_sigma*width_lat)
+                lower_lat = np.maximum(lat_i, coord.lat - max_sigma*width_lat)
+                
+                pdf_int,_ = dblquad(lambda y,x: dist.pdf([x,y]), 
+                                    lower_lon.to_value(u.rad), upper_lon.to_value(u.rad), 
+                                    lower_lat.to_value(u.rad), upper_lat.to_value(u.rad))
+                
+                model[nLon, nLat] = flux*pdf_int
+                
+        model *= flux/np.sum(model)
+
+        return model
+
+    # ======== Tested in 3D above this line ======
+    @u.quantity_input(rate = u.Hz, duration = u.s)
+    def uniform_bkg(self, rate, duration):
+
+        bkg = Histogram(self.detector_axes)
+
+        bkg[:] = bkg.axis.widths.value
+        
+        bkg *= (rate*duration).to('').value / np.sum(bkg)
+
+        return bkg
+
+    # ======== 2D bwlow this line =======
     
     @u.quantity_input(model = u.Unit()/u.m/u.s, duration = u.s)
     def convolve_model(self, model, duration, fluctuate = True):
@@ -253,29 +344,3 @@ class ToyCodedMaskDetector3D:
 
         return expectation
 
-    @u.quantity_input(flux = u.Unit()/u.m/u.s, angle = u.rad, width = u.rad)
-    def gaussian_model(self, flux, angle, width):
-
-        #Prevent numerical error from point sources
-        width = np.maximum(self.angular_resolution/1e6, width) 
-        
-        # Factor 5 ang res, somewhat arbitrary
-        model = Histogram(self.sky_axis, unit = flux.unit)
-
-        norm_cdf = norm.cdf(model.axis.edges.to_value(u.rad),
-                            loc = angle.to_value(u.rad),
-                            scale = width.to_value(u.rad))
-        model[:] = flux * (norm_cdf[1:] - norm_cdf[:-1])
-
-        return model
-
-    @u.quantity_input(rate = u.Hz, duration = u.s)
-    def uniform_bkg(self, rate, duration):
-
-        bkg = Histogram(self.detector_axis)
-
-        bkg[:] = bkg.axis.widths.value
-        
-        bkg *= (rate*duration).to('').value / np.sum(bkg)
-
-        return bkg
