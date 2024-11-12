@@ -6,6 +6,8 @@ from astropy.units import Quantity
 from scipy.stats import poisson
 from histpy import Histogram, Axis, Axes
 from scipy.stats import poisson, norm
+from scipy.stats import multivariate_normal
+from scipy.integrate import dblquad
 from tqdm import tqdm
 
 class ToyCodedMaskDetector3D:
@@ -262,76 +264,62 @@ class ToyCodedMaskDetector3D:
         0 beyond max_sigma
         """
 
-        flux = 1/u.cm/u.cm/u.s
-        coord = UnitSphericalRepresentation(lon = 0*u.deg, lat = 0*u.deg)
-        width_lon = 10*u.arcmin
-        width_lat = 10*u.arcmin
-
         width_lon = np.maximum(self.angular_resolution/1e6, width_lon)
         width_lat = np.maximum(self.angular_resolution/1e6, width_lat)
 
         model = Histogram(self.sky_axes, unit = flux.unit) 
 
-        from scipy.stats import multivariate_normal
-        from scipy.integrate import dblquad
-
-        dist = multivariate_normal(mean = [coord.lon.to_value(u.rad), coord.lon.to_value(u.rad)],
+        dist = multivariate_normal(mean = [coord.lon.to_value(u.rad), coord.lat.to_value(u.rad)],
                                    cov = [[width_lon.to_value(u.rad)**2,0],[0,width_lat.to_value(u.rad)**2]])
 
         # Mask at 3 sigma for speed
-        nLon_list = np.arange(self.sky_axes['lon'].nbins)
-        lon_lower_bounds = self.sky_axes['lon'].lower_bounds 
-        lon_centers = self.sky_axes['lon'].centers
-        lon_upper_bounds = self.sky_axes['lon'].upper_bounds
+        lon_axis = self.sky_axes['lon']
+        min_lon_bin = np.maximum(0,                  lon_axis.find_bin(coord.lon - max_sigma*width_lon))
+        max_lon_bin = np.minimum(lon_axis.nbins - 1, lon_axis.find_bin(coord.lon + max_sigma*width_lon))
+        lon_edges = lon_axis.edges[min_lon_bin:max_lon_bin+2].to_value(u.rad)
+                                 
+        lat_axis = self.sky_axes['lat']
+        min_lat_bin = np.maximum(0,                  lat_axis.find_bin(coord.lat - max_sigma*width_lat))
+        max_lat_bin = np.minimum(lat_axis.nbins - 1, lat_axis.find_bin(coord.lat + max_sigma*width_lat))
+        lat_edges = lat_axis.edges[min_lat_bin:max_lat_bin+2].to_value(u.rad)
 
-        lon_mask = (lon_lower_bounds - coord.lon < max_sigma*width_lon) & (coord.lon - lon_upper_bounds < max_sigma*width_lon)
-        nLon_list = nLon_list[lon_mask]
-        lon_lower_bounds = lon_lower_bounds[lon_mask]
-        lon_centers = lon_centers[lon_mask]
-        lon_upper_bounds = lon_upper_bounds[lon_mask]
+        if min_lon_bin >= lon_axis.nbins or max_lon_bin < 0 or min_lat_bin >= lat_axis.nbins or max_lat_bin < 0:
+            # Fully outside
+            return model
+        
+        # Compute
+        LON,LAT = np.meshgrid(lon_edges, lat_edges, indexing='ij')
+        
+        cdf = dist.cdf(np.transpose([LON,LAT], [1,2,0]))
 
-        nLat_list = np.arange(self.sky_axes['lat'].nbins)
-        lat_lower_bounds = self.sky_axes['lat'].lower_bounds 
-        lat_centers = self.sky_axes['lat'].centers 
-        lat_upper_bounds = self.sky_axes['lat'].upper_bounds
+        pdf_int = np.diff(np.diff(cdf, axis = 0), axis = 1)
 
-        lat_mask = (lat_lower_bounds - coord.lat < max_sigma*width_lat) & (coord.lat - lat_upper_bounds < max_sigma*width_lat)
-        nLat_list = nLat_list[lat_mask]
-        lat_lower_bounds = lat_lower_bounds[lat_mask]
-        lat_centers = lat_centers[lat_mask]
-        lat_upper_bounds = lat_upper_bounds[lat_mask]
-
-        for nLon,lon_i, lon_c, lon_f in zip(nLon_list, lon_lower_bounds, lon_centers, lon_upper_bounds):
-            for nLat,lat_i, lat_c, lat_f in zip(nLat_list, lat_lower_bounds, lat_centers, lat_upper_bounds):
-                
-                # The main purpose of this line is to make dblquadis work if the width is tiny
-                upper_lon = np.minimum(lon_f, coord.lon + max_sigma*width_lon)
-                lower_lon = np.maximum(lon_i, coord.lon - max_sigma*width_lon)
-                upper_lat = np.minimum(lat_f, coord.lat + max_sigma*width_lat)
-                lower_lat = np.maximum(lat_i, coord.lat - max_sigma*width_lat)
-                
-                pdf_int,_ = dblquad(lambda y,x: dist.pdf([x,y]), 
-                                    lower_lon.to_value(u.rad), upper_lon.to_value(u.rad), 
-                                    lower_lat.to_value(u.rad), upper_lat.to_value(u.rad))
-                
-                model[nLon, nLat] = flux*pdf_int
-                
-        model *= flux/np.sum(model)
+        model[min_lon_bin:max_lon_bin+1, min_lat_bin:max_lat_bin+1] = flux * pdf_int
 
         return model
 
-    # ======== Tested in 3D above this line ======
     @u.quantity_input(rate = u.Hz, duration = u.s)
     def uniform_bkg(self, rate, duration):
 
         bkg = Histogram(self.detector_axes)
 
-        bkg[:] = bkg.axis.widths.value
+        bkg[:] = bkg.axes[0].widths.value[:,None] * bkg.axes[1].widths.value[None,:] 
         
         bkg *= (rate*duration).to('').value / np.sum(bkg)
 
         return bkg
 
+    # ======== Tested in 3D above this line ======
+
+    @u.quantity_input(flux = u.Unit()/u.cm/u.cm/u.s/u.sr, angle = u.rad, width = u.rad)
+    def isotropic_diffuse_model(self, flux):
+
+        model = Histogram(self.sky_axes, unit = flux.unit * u.sr) 
+
+        model[:] = flux * model.axes['lon'].widths[:,None] * (np.sin(model.axes['lat'].upper_bounds) - np.sin(model.axes['lat'].lower_bounds)) * u.rad
+
+        return model
+    
     # ======== 2D bwlow this line =======
     
     @u.quantity_input(model = u.Unit()/u.m/u.s, duration = u.s)
