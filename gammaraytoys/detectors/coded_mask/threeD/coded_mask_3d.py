@@ -10,6 +10,7 @@ from scipy.stats import multivariate_normal
 from scipy.integrate import dblquad
 from tqdm import tqdm
 import sparse
+import h5py as h5
 
 class ToyCodedMaskDetector3D:
 
@@ -26,6 +27,45 @@ class ToyCodedMaskDetector3D:
         self._response = None
         self.shielding = shielding
 
+    def write(self, filename):
+
+        Histogram(self.detector_axes).write(filename, 'detector_axes')
+        self.mask.write(filename, 'mask')
+
+        if self.response is not None:
+            self.response.write(filename, 'response')
+
+        with h5.File(filename, 'a') as f:
+
+            f.attrs['mask_separation'] = str(self.mask_separation)
+            f.attrs['detector_efficiency'] = str(self.detector_efficiency)
+            f.attrs['shielding'] = str(self.shielding)
+
+    @classmethod
+    def open(cls, filename):
+
+        detector_axes = Histogram.open(filename, 'detector_axes').axes
+        mask = Histogram.open(filename, 'mask')
+        
+        with h5.File(filename, 'r') as f:
+
+            mask_separation = u.Quantity(f.attrs['mask_separation'])
+            detector_efficiency = u.Quantity(f.attrs['detector_efficiency'])
+            shielding = u.Quantity(f.attrs['shielding'])
+
+            has_response = 'response' in f
+
+        new = cls(detector_axes = detector_axes,
+                  mask = mask,
+                  mask_separation = mask_separation,
+                  detector_efficiency = detector_efficiency,
+                  shielding = shielding)
+
+        if has_response:
+            new._response = Histogram.open(filename, 'response')
+
+        return new
+            
     @classmethod
     @u.quantity_input(mask_size = u.m, mask_separation = u.m, detector_size = u.m)
     def create_random_mask(cls, mask_size, mask_npix, mask_separation, open_fraction, detector_size, detector_npix, detector_efficiency, shielding = 1):
@@ -54,7 +94,7 @@ class ToyCodedMaskDetector3D:
                    mask_separation = mask_separation, 
                    detector_efficiency = detector_efficiency,
                    shielding = shielding)
-
+    
     @property
     def mask(self):
         return self._mask
@@ -162,101 +202,122 @@ class ToyCodedMaskDetector3D:
         return sparse.GCXS.from_coo(mask_bins_weights)
     
     @u.quantity_input(flux = u.Unit()/u.m/u.m/u.s, duration = u.s, angle = u.rad)
-    def point_source_response(self, flux, duration, coord, fluctuate = False, imaging = True):
+    def point_source_response(self, flux, duration, coord, fluctuate = False, imaging = True, use_cache = True):
 
         # Standarize coordinate
         coord = coord.represent_as(UnitSphericalRepresentation)
 
-        lon = coord.lon.to_value(u.rad)
-        lat = coord.lat.to_value(u.rad)
+        lon = coord.lon
+        lat = coord.lat
 
-        # Init expectation to 0
-        # Faster without units, we'll get them later
-        expectation = np.zeros(self._det_axes.nbins)
+        if lon > 180*u.deg:
+            lon -= 360*u.deg
 
-        # Coded mask geometry
-        # Weight by pixel area
-        det_x_widths = self.detector_axes[0].widths.value
-        det_y_widths = self.detector_axes[1].widths.value
-        det_x_lbounds = self.detector_axes[0].lower_bounds.value
-        det_y_lbounds = self.detector_axes[1].lower_bounds.value
-        det_x_ubounds = self.detector_axes[0].upper_bounds.value
-        det_y_ubounds = self.detector_axes[1].upper_bounds.value
-        
-        pix_area = det_x_widths[:,None] * det_y_widths[None,:] 
-        
-        # Coded mask projection edges
-        right_edge =  np.minimum(np.maximum(self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
-        left_edge =   np.minimum(np.maximum(self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
-        top_edge =    np.minimum(np.maximum(self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
-        bottom_edge = np.minimum(np.maximum(self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
+        # Check if catched
+        response = None
+        if use_cache and self.response is not None:
+            if (lon >= self.response.axes['lon'].lo_lim and lon < self.response.axes['lon'].hi_lim and
+                lat >= self.response.axes['lat'].lo_lim and lat < self.response.axes['lat'].hi_lim):
 
-        # Shield
+                response = self.response[self.response.axes['lon'].find_bin(lon),
+                                         self.response.axes['lat'].find_bin(lat)]
 
-        # Get mask projection bins
-        right_edge_bin =  np.minimum(np.maximum(self.detector_axes[0].find_bin(right_edge),  0), self.detector_axes[0].nbins-1)
-        left_edge_bin =   np.minimum(np.maximum(self.detector_axes[0].find_bin(left_edge),   0), self.detector_axes[0].nbins-1)
-        top_edge_bin =    np.minimum(np.maximum(self.detector_axes[1].find_bin(top_edge),    0), self.detector_axes[1].nbins-1)
-        bottom_edge_bin = np.minimum(np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0), self.detector_axes[1].nbins-1)
+        # Compute response if not cached
+        if response is None:
 
-        # Unit applied later
-        right_edge  = right_edge.value
-        left_edge   = left_edge.value
-        top_edge    = top_edge.value
-        bottom_edge = bottom_edge.value
-
-        shield_leak = 1-self.shielding
-        expectation[:] = shield_leak
-
-        if imaging:
-            mask_factor = 0
-        else:
-            mask_factor = self.open_fraction
-
-        # Pixels fully contains
-        expectation[left_edge_bin+1:right_edge_bin, bottom_edge_bin+1:top_edge_bin] = mask_factor
-
-        # Mask edge
-        diff_factor = mask_factor-shield_leak
-        left_factor   = (det_x_ubounds[left_edge_bin] - left_edge)     / det_x_widths[left_edge_bin]
-        right_factor  = (right_edge - det_x_lbounds[right_edge_bin])   / det_x_widths[right_edge_bin]
-        bottom_factor = (det_y_ubounds[bottom_edge_bin] - bottom_edge) / det_y_widths[bottom_edge_bin]
-        top_factor    = (top_edge - det_y_lbounds[top_edge_bin])       / det_y_widths[top_edge_bin]
-        
-        # Sides
-        expectation[left_edge_bin,  bottom_edge_bin+1:top_edge_bin] += diff_factor * left_factor
-        expectation[right_edge_bin, bottom_edge_bin+1:top_edge_bin] += diff_factor * right_factor
-
-        expectation[left_edge_bin+1:right_edge_bin, bottom_edge_bin] += diff_factor * bottom_factor
-        expectation[left_edge_bin+1:right_edge_bin, top_edge_bin]    += diff_factor * top_factor
-
-        # Corners
-        expectation[left_edge_bin,  bottom_edge_bin] += diff_factor * left_factor  * bottom_factor
-        expectation[right_edge_bin, bottom_edge_bin] += diff_factor * right_factor * bottom_factor
-        expectation[left_edge_bin,  top_edge_bin]    += diff_factor * left_factor  * top_factor
-        expectation[right_edge_bin, top_edge_bin]    += diff_factor * right_factor * top_factor
-
-        # Area overal weights
-        expectation *= pix_area
-        
-        # Coded Mask
-        if imaging:
-
-            # Get geometrical weight along each axis
-            mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
-            mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
-
-            # Equiv to
-            # expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
-            # Over all det and mask bins
-            mask = sparse.GCXS.from_numpy(self.mask)
-
-            expectation += sparse.einsum('jn,in', mask_bin_weights_y, sparse.einsum('im,mn', mask_bin_weights_x, mask)).todense()
+            # Faster without units, we'll get them later
+            lon = lon.to_value(u.rad)
+            lat = lat.to_value(u.rad)
             
-        # Weight by exposure and
-        off_axis_angle = np.arccos(coord.to_cartesian().x)
-        
-        expectation = expectation * self._det_axes['x'].unit * self._det_axes['y'].unit * flux * duration * np.cos(off_axis_angle) * self._det_eff
+            # Init response to 0
+            response = np.zeros(self._det_axes.nbins)
+
+            # Coded mask geometry
+            # Weight by pixel area
+            det_x_widths = self.detector_axes[0].widths.value
+            det_y_widths = self.detector_axes[1].widths.value
+            det_x_lbounds = self.detector_axes[0].lower_bounds.value
+            det_y_lbounds = self.detector_axes[1].lower_bounds.value
+            det_x_ubounds = self.detector_axes[0].upper_bounds.value
+            det_y_ubounds = self.detector_axes[1].upper_bounds.value
+
+            pix_area = det_x_widths[:,None] * det_y_widths[None,:] 
+
+            # Coded mask projection edges
+            right_edge =  np.minimum(np.maximum(self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
+            left_edge =   np.minimum(np.maximum(self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
+            top_edge =    np.minimum(np.maximum(self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
+            bottom_edge = np.minimum(np.maximum(self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
+
+            # Shield
+
+            # Get mask projection bins
+            right_edge_bin =  np.minimum(np.maximum(self.detector_axes[0].find_bin(right_edge),  0), self.detector_axes[0].nbins-1)
+            left_edge_bin =   np.minimum(np.maximum(self.detector_axes[0].find_bin(left_edge),   0), self.detector_axes[0].nbins-1)
+            top_edge_bin =    np.minimum(np.maximum(self.detector_axes[1].find_bin(top_edge),    0), self.detector_axes[1].nbins-1)
+            bottom_edge_bin = np.minimum(np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0), self.detector_axes[1].nbins-1)
+
+            # Unit applied later
+            right_edge  = right_edge.value
+            left_edge   = left_edge.value
+            top_edge    = top_edge.value
+            bottom_edge = bottom_edge.value
+
+            shield_leak = 1-self.shielding
+            response[:] = shield_leak
+
+            if imaging:
+                mask_factor = 0
+            else:
+                mask_factor = self.open_fraction
+
+            # Pixels fully contains
+            response[left_edge_bin+1:right_edge_bin, bottom_edge_bin+1:top_edge_bin] = mask_factor
+
+            # Mask edge
+            diff_factor = mask_factor-shield_leak
+            left_factor   = (det_x_ubounds[left_edge_bin] - left_edge)     / det_x_widths[left_edge_bin]
+            right_factor  = (right_edge - det_x_lbounds[right_edge_bin])   / det_x_widths[right_edge_bin]
+            bottom_factor = (det_y_ubounds[bottom_edge_bin] - bottom_edge) / det_y_widths[bottom_edge_bin]
+            top_factor    = (top_edge - det_y_lbounds[top_edge_bin])       / det_y_widths[top_edge_bin]
+
+            # Sides
+            response[left_edge_bin,  bottom_edge_bin+1:top_edge_bin] += diff_factor * left_factor
+            response[right_edge_bin, bottom_edge_bin+1:top_edge_bin] += diff_factor * right_factor
+
+            response[left_edge_bin+1:right_edge_bin, bottom_edge_bin] += diff_factor * bottom_factor
+            response[left_edge_bin+1:right_edge_bin, top_edge_bin]    += diff_factor * top_factor
+
+            # Corners
+            response[left_edge_bin,  bottom_edge_bin] += diff_factor * left_factor  * bottom_factor
+            response[right_edge_bin, bottom_edge_bin] += diff_factor * right_factor * bottom_factor
+            response[left_edge_bin,  top_edge_bin]    += diff_factor * left_factor  * top_factor
+            response[right_edge_bin, top_edge_bin]    += diff_factor * right_factor * top_factor
+
+            # Area overal weights
+            response *= pix_area
+
+            # Coded Mask
+            if imaging:
+
+                # Get geometrical weight along each axis
+                mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
+                mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
+
+                # Equiv to
+                # response[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
+                # Over all det and mask bins
+                mask = sparse.GCXS.from_numpy(self.mask)
+
+                response += sparse.einsum('jn,in', mask_bin_weights_y, sparse.einsum('im,mn', mask_bin_weights_x, mask)).todense()
+
+            # Weight by exposure and
+            off_axis_angle = np.arccos(coord.to_cartesian().x)
+
+            response = response * self._det_axes['x'].unit * self._det_axes['y'].unit * np.cos(off_axis_angle) * self._det_eff
+
+        # Multiply by exposuse
+        expectation = response * flux * duration
 
         # Convert Quantity to np array (it should be already unitless)
         expectation = Histogram(self.detector_axes, expectation.to('').value)
@@ -265,33 +326,47 @@ class ToyCodedMaskDetector3D:
             expectation[:] = poisson.rvs(mu = expectation.contents)
         
         return expectation
-    
+
+    def compute_response(self, lon_range = None, lat_range = None):
+
+        # Standarize input
+        if lon_range is None:
+            min_lon = 0
+            max_lon = self.sky_axes['lon'].nbins
+        else:
+            min_lon,max_lon = self.sky_axes['lon'].find_bin(u.Quantity(lon_range))
+
+        if lat_range is None:
+            min_lat = 0
+            max_lat = self.sky_axes['lat'].nbins
+        else:
+            min_lat,max_lat = self.sky_axes['lat'].find_bin(u.Quantity(lat_range))
+
+        response = Histogram([self.sky_axes['lon'][min_lon:max_lon+1],
+                              self.sky_axes['lat'][min_lat:max_lat+1]] +
+                              list(self.detector_axes),
+                              track_overflow = False)
+                             
+        flux = 1/u.cm/u.cm/u.s
+        duration = 1*u.s
+        
+        for nLon, lon in tqdm(enumerate(response.axes['lon'].centers), total = response.axes['lon'].nbins):
+            for nLat, lat in enumerate(response.axes['lat'].centers):
+
+                coord = UnitSphericalRepresentation(lon = lon, lat = lat)
+
+                response[nLon, nLat] = self.point_source_response(flux = flux,
+                                                                  coord = coord,
+                                                                  duration = duration,
+                                                                  fluctuate = False).contents
+                                
+        # Normalize and given area units
+        response /= flux*duration
+
+        self._response = response
+            
     @property
     def response(self):
-        if self._response is None:
-            # Compute and cache
-
-            flux = 1/u.cm/u.cm/u.s
-            duration = 1*u.s
-            
-            response = Histogram(list(self.sky_axes) + list(self.detector_axes),
-                                 track_overflow = False)
-
-            for nLon, lon in tqdm(enumerate(self.sky_axes[0].centers), total = self.sky_axes[0].nbins):
-                for nLat, lat in enumerate(self.sky_axes[1].centers):
-
-                    coord = UnitSphericalRepresentation(lon = lon, lat = lat)
-
-                    response[nLon, nLat] = self.point_source_response(flux = flux,
-                                                                      coord = coord,
-                                                                      duration = duration,
-                                                                      fluctuate = False).contents
-                                
-            # Normalize and given area units
-            response /= flux*duration
-
-            self._response = response
-                            
         return self._response
 
     def effective_area(self, coord):
