@@ -9,6 +9,7 @@ from scipy.stats import poisson, norm
 from scipy.stats import multivariate_normal
 from scipy.integrate import dblquad
 from tqdm import tqdm
+import sparse
 
 class ToyCodedMaskDetector3D:
 
@@ -116,7 +117,7 @@ class ToyCodedMaskDetector3D:
     def fully_coded_fov(self):
         return u.Quantity([np.arctan((self.mask_size[0]/2-self.detector_size[0]/2)/self.mask_separation),
                            np.arctan((self.mask_size[0]/2-self.detector_size[0]/2)/self.mask_separation)])
-
+    
     def _get_mask_axis_geom_weights(self, det_axis, mask_axis, angle):
 
         mask_proj_edges = mask_axis.edges - self._mask_sep * np.tan(angle)
@@ -124,8 +125,9 @@ class ToyCodedMaskDetector3D:
         mask_proj_idx = det_axis.find_bin(mask_proj_edges)
 
         # Each elemet will be a list of mask_bins,geom_weight pairs
-        mask_bins_weights = [[] for i in range(det_axis.nbins)]
-        
+        mask_bins = []
+        mask_weights = []
+
         for mask_bin,(det_bin_i,det_bin_f) in enumerate(zip(mask_proj_idx[:-1], mask_proj_idx[1:])):
 
             if det_bin_f < 0 or det_bin_i >= det_axis.nbins: 
@@ -134,20 +136,31 @@ class ToyCodedMaskDetector3D:
             # Middle bins. Full
             for det_bin,width in zip(range(det_bin_i+1, det_bin_f),
                                      det_axis.widths[det_bin_i+1: det_bin_f]):
-                mask_bins_weights[det_bin] += [(mask_bin, width.value)]
-            
+
+                mask_bins += [[det_bin, mask_bin]]
+                mask_weights += [width.value]
+
             # Lower edge
             if det_bin_i >= 0:
                 upper_bound = det_axis.upper_bounds[det_bin_i]
-                mask_bins_weights[det_bin_i] += [(mask_bin, (upper_bound - mask_proj_edges[mask_bin]).value)]
-            
+
+                mask_bins += [[det_bin_i, mask_bin]]
+                mask_weights += [(upper_bound - mask_proj_edges[mask_bin]).value]
+
             # Upper edge
             if det_bin_f < det_axis.nbins:
                 lower_bound = det_axis.lower_bounds[det_bin_f]
-                mask_bins_weights[det_bin_f] += [(mask_bin, (mask_proj_edges[mask_bin+1] - lower_bound).value)]
 
-        return mask_bins_weights
+                mask_bins += [[det_bin_f, mask_bin]]
+                mask_weights += [(mask_proj_edges[mask_bin+1] - lower_bound).value]
 
+        mask_bins_weights = sparse.COO(coords = np.transpose(mask_bins),
+                                       data = mask_weights,
+                                       shape = [det_axis.nbins, mask_axis.nbins])
+
+        #return mask_bins_weights.tocsr()
+        return sparse.GCXS.from_coo(mask_bins_weights)
+    
     @u.quantity_input(flux = u.Unit()/u.m/u.m/u.s, duration = u.s, angle = u.rad)
     def point_source_response(self, flux, duration, coord, fluctuate = False, imaging = True):
 
@@ -173,18 +186,18 @@ class ToyCodedMaskDetector3D:
         pix_area = det_x_widths[:,None] * det_y_widths[None,:] 
         
         # Coded mask projection edges
-        right_edge =  self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation
-        left_edge =   self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation
-        top_edge =    self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation
-        bottom_edge = self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation
+        right_edge =  np.minimum(np.maximum(self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
+        left_edge =   np.minimum(np.maximum(self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation, self.detector_axes[0].lo_lim), self.detector_axes[0].hi_lim)
+        top_edge =    np.minimum(np.maximum(self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
+        bottom_edge = np.minimum(np.maximum(self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation, self.detector_axes[1].lo_lim), self.detector_axes[1].hi_lim)
 
         # Shield
 
         # Get mask projection bins
-        right_edge_bin =  np.maximum(self.detector_axes[0].find_bin(right_edge),  0)
-        left_edge_bin =   np.maximum(self.detector_axes[0].find_bin(left_edge),   0)
-        top_edge_bin =    np.maximum(self.detector_axes[1].find_bin(top_edge),    0)
-        bottom_edge_bin = np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0)
+        right_edge_bin =  np.minimum(np.maximum(self.detector_axes[0].find_bin(right_edge),  0), self.detector_axes[0].nbins-1)
+        left_edge_bin =   np.minimum(np.maximum(self.detector_axes[0].find_bin(left_edge),   0), self.detector_axes[0].nbins-1)
+        top_edge_bin =    np.minimum(np.maximum(self.detector_axes[1].find_bin(top_edge),    0), self.detector_axes[1].nbins-1)
+        bottom_edge_bin = np.minimum(np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0), self.detector_axes[1].nbins-1)
 
         # Unit applied later
         right_edge  = right_edge.value
@@ -203,13 +216,12 @@ class ToyCodedMaskDetector3D:
         # Pixels fully contains
         expectation[left_edge_bin+1:right_edge_bin, bottom_edge_bin+1:top_edge_bin] = mask_factor
 
-        
         # Mask edge
         diff_factor = mask_factor-shield_leak
-        left_factor = (det_x_ubounds[left_edge_bin] - left_edge) / det_x_widths[left_edge_bin]
-        right_factor = (right_edge - det_x_lbounds[left_edge_bin]) / det_x_widths[right_edge_bin]
+        left_factor   = (det_x_ubounds[left_edge_bin] - left_edge)     / det_x_widths[left_edge_bin]
+        right_factor  = (right_edge - det_x_lbounds[right_edge_bin])   / det_x_widths[right_edge_bin]
         bottom_factor = (det_y_ubounds[bottom_edge_bin] - bottom_edge) / det_y_widths[bottom_edge_bin]
-        top_factor = (top_edge - det_y_lbounds[bottom_edge_bin]) / det_y_widths[top_edge_bin]
+        top_factor    = (top_edge - det_y_lbounds[top_edge_bin])       / det_y_widths[top_edge_bin]
         
         # Sides
         expectation[left_edge_bin,  bottom_edge_bin+1:top_edge_bin] += diff_factor * left_factor
@@ -227,62 +239,19 @@ class ToyCodedMaskDetector3D:
         # Area overal weights
         expectation *= pix_area
         
-        # Mask
+        # Coded Mask
         if imaging:
 
-            # Unit applied later
-            right_edge  = right_edge.value
-            left_edge   = left_edge.value
-            top_edge    = top_edge.value
-            bottom_edge = bottom_edge.value
-            
             # Get geometrical weight along each axis
             mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
             mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
 
-            # Cache for speed
-            mask = self.mask.contents
+            # Equiv to
+            # expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
+            # Over all det and mask bins
+            mask = sparse.GCXS.from_numpy(self.mask)
 
-            # Loop through all x,y weights combinations
-            for det_bin_x,(det_bin_left, det_bin_right) in enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)):
-                for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(self.detector_axes[1].lower_bounds.value, self.detector_axes[1].upper_bounds.value)):
-
-                    # From mask
-                    for mask_bin_x, geom_weight_x in mask_bin_weights_x[det_bin_x]:
-                        for mask_bin_y, geom_weight_y in mask_bin_weights_y[det_bin_y]:
-                            expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
-
-                    # Outside mask, through shielding
-                    shield_leak = 1-self.shielding
-
-                    if left_edge <= det_bin_left or det_bin_right <= right_edge:
-                        shield_leak *= 0
-                    else:
-                        shield_leak *= np.min(left_edge, det_bin_right) - np.max(right_edge, det_min_left)
-
-                    if bottom_edge <= det_bin_bottom or det_bin_top <= top_edge:
-                        shield_leak *= 0
-                    else:
-                        shield_leak *= np.min(bottom_edge, det_bin_top) - np.max(top_edge, det_min_bottom)
-
-                    expectation[det_bin_x, det_bin_y] += shield_leak
-
-        else:
-
-            # Get mask projection bins
-            right_edge_bin =  np.maximum(self.detector_axes[0].find_bin(right_edge),  0)
-            left_edge_bin =   np.maximum(self.detector_axes[0].find_bin(left_edge),   0)
-            top_edge_bin =    np.maximum(self.detector_axes[1].find_bin(top_edge),    0)
-            bottom_edge_bin = np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0)
-
-            # Mean attenuatuon weights
-            expectation[:] = 1-self.shielding
-            expectation[left_edge_bin:right_edge_bin, bottom_edge_bin:top_edge_bin] = self.open_fraction
-
-            # Weight by pixel area
-            pix_area = self.detector_axes[0].widths.value[:,None] * self.detector_axes[1].widths.value[None,:] 
-
-            expectation *= pix_area
+            expectation += sparse.einsum('jn,in', mask_bin_weights_y, sparse.einsum('im,mn', mask_bin_weights_x, mask)).todense()
             
         # Weight by exposure and
         off_axis_angle = np.arccos(coord.to_cartesian().x)
