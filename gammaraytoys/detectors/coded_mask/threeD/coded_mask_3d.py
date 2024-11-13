@@ -71,6 +71,10 @@ class ToyCodedMaskDetector3D:
         return self._mask_sep
 
     @property
+    def open_fraction(self):
+        return np.sum(self.mask) / np.prod(self.mask.nbins)
+
+    @property
     def angular_resolution(self):
         return np.arctan(np.min(u.Quantity([ax.widths for ax in self.mask.axes]))/self.mask_separation)
 
@@ -145,7 +149,7 @@ class ToyCodedMaskDetector3D:
         return mask_bins_weights
 
     @u.quantity_input(flux = u.Unit()/u.m/u.m/u.s, duration = u.s, angle = u.rad)
-    def point_source_response(self, flux, duration, coord, fluctuate = False):
+    def point_source_response(self, flux, duration, coord, fluctuate = False, imaging = True):
 
         # Standarize coordinate
         coord = coord.represent_as(UnitSphericalRepresentation)
@@ -157,43 +161,129 @@ class ToyCodedMaskDetector3D:
         # Faster without units, we'll get them later
         expectation = np.zeros(self._det_axes.nbins)
 
+        # Coded mask geometry
+        # Weight by pixel area
+        det_x_widths = self.detector_axes[0].widths.value
+        det_y_widths = self.detector_axes[1].widths.value
+        det_x_lbounds = self.detector_axes[0].lower_bounds.value
+        det_y_lbounds = self.detector_axes[1].lower_bounds.value
+        det_x_ubounds = self.detector_axes[0].upper_bounds.value
+        det_y_ubounds = self.detector_axes[1].upper_bounds.value
+        
+        pix_area = det_x_widths[:,None] * det_y_widths[None,:] 
+        
         # Coded mask projection edges
-        right_edge =  (self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation).value
-        left_edge =   (self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation).value
-        top_edge =    (self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation).value
-        bottom_edge = (self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation).value
+        right_edge =  self.mask.axes['x'].hi_lim - np.tan(lon)*self.mask_separation
+        left_edge =   self.mask.axes['x'].lo_lim - np.tan(lon)*self.mask_separation
+        top_edge =    self.mask.axes['y'].hi_lim - np.tan(lat)*self.mask_separation
+        bottom_edge = self.mask.axes['y'].lo_lim - np.tan(lat)*self.mask_separation
+
+        # Shield
+
+        # Get mask projection bins
+        right_edge_bin =  np.maximum(self.detector_axes[0].find_bin(right_edge),  0)
+        left_edge_bin =   np.maximum(self.detector_axes[0].find_bin(left_edge),   0)
+        top_edge_bin =    np.maximum(self.detector_axes[1].find_bin(top_edge),    0)
+        bottom_edge_bin = np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0)
+
+        # Unit applied later
+        right_edge  = right_edge.value
+        left_edge   = left_edge.value
+        top_edge    = top_edge.value
+        bottom_edge = bottom_edge.value
+
+        shield_leak = 1-self.shielding
+        expectation[:] = shield_leak
+
+        if imaging:
+            mask_factor = 0
+        else:
+            mask_factor = self.open_fraction
+
+        # Pixels fully contains
+        expectation[left_edge_bin+1:right_edge_bin, bottom_edge_bin+1:top_edge_bin] = mask_factor
+
         
-        # Get geometrical weight along each axis
-        mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
-        mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
-
-        # Cache for speed
-        mask = self.mask.contents
+        # Mask edge
+        diff_factor = mask_factor-shield_leak
+        left_factor = (det_x_ubounds[left_edge_bin] - left_edge) / det_x_widths[left_edge_bin]
+        right_factor = (right_edge - det_x_lbounds[left_edge_bin]) / det_x_widths[right_edge_bin]
+        bottom_factor = (det_y_ubounds[bottom_edge_bin] - bottom_edge) / det_y_widths[bottom_edge_bin]
+        top_factor = (top_edge - det_y_lbounds[bottom_edge_bin]) / det_y_widths[top_edge_bin]
         
-        # Loop through all x,y weights combinations
-        for det_bin_x,(det_bin_left, det_bin_right) in enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)):
-            for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(self.detector_axes[1].lower_bounds.value, self.detector_axes[1].upper_bounds.value)):
+        # Sides
+        expectation[left_edge_bin,  bottom_edge_bin+1:top_edge_bin] += diff_factor * left_factor
+        expectation[right_edge_bin, bottom_edge_bin+1:top_edge_bin] += diff_factor * right_factor
 
-                # From mask
-                for mask_bin_x, geom_weight_x in mask_bin_weights_x[det_bin_x]:
-                    for mask_bin_y, geom_weight_y in mask_bin_weights_y[det_bin_y]:
-                        expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
+        expectation[left_edge_bin+1:right_edge_bin, bottom_edge_bin] += diff_factor * bottom_factor
+        expectation[left_edge_bin+1:right_edge_bin, top_edge_bin]    += diff_factor * top_factor
 
-                # Outside mask, through shielding
-                shield_leak = 1-self.shielding
+        # Corners
+        expectation[left_edge_bin,  bottom_edge_bin] += diff_factor * left_factor  * bottom_factor
+        expectation[right_edge_bin, bottom_edge_bin] += diff_factor * right_factor * bottom_factor
+        expectation[left_edge_bin,  top_edge_bin]    += diff_factor * left_factor  * top_factor
+        expectation[right_edge_bin, top_edge_bin]    += diff_factor * right_factor * top_factor
 
-                if left_edge <= det_bin_left or det_bin_right <= right_edge:
-                    shield_leak *= 0
-                else:
-                    shield_leak *= np.min(left_edge, det_bin_right) - np.max(right_edge, det_min_left)
-                    
-                if bottom_edge <= det_bin_bottom or det_bin_top <= top_edge:
-                    shield_leak *= 0
-                else:
-                    shield_leak *= np.min(bottom_edge, det_bin_top) - np.max(top_edge, det_min_bottom)
-                
-                expectation[det_bin_x, det_bin_y] += shield_leak
-                        
+        # Area overal weights
+        expectation *= pix_area
+        
+        # Mask
+        if imaging:
+
+            # Unit applied later
+            right_edge  = right_edge.value
+            left_edge   = left_edge.value
+            top_edge    = top_edge.value
+            bottom_edge = bottom_edge.value
+            
+            # Get geometrical weight along each axis
+            mask_bin_weights_x = self._get_mask_axis_geom_weights(self._det_axes['x'], self._mask.axes['x'], lon)
+            mask_bin_weights_y = self._get_mask_axis_geom_weights(self._det_axes['y'], self._mask.axes['y'], lat)
+
+            # Cache for speed
+            mask = self.mask.contents
+
+            # Loop through all x,y weights combinations
+            for det_bin_x,(det_bin_left, det_bin_right) in enumerate(zip(self.detector_axes[0].lower_bounds.value, self.detector_axes[0].upper_bounds.value)):
+                for det_bin_y,(det_bin_bottom, det_bin_top) in enumerate(zip(self.detector_axes[1].lower_bounds.value, self.detector_axes[1].upper_bounds.value)):
+
+                    # From mask
+                    for mask_bin_x, geom_weight_x in mask_bin_weights_x[det_bin_x]:
+                        for mask_bin_y, geom_weight_y in mask_bin_weights_y[det_bin_y]:
+                            expectation[det_bin_x, det_bin_y] += mask[mask_bin_x, mask_bin_y] * geom_weight_x * geom_weight_y
+
+                    # Outside mask, through shielding
+                    shield_leak = 1-self.shielding
+
+                    if left_edge <= det_bin_left or det_bin_right <= right_edge:
+                        shield_leak *= 0
+                    else:
+                        shield_leak *= np.min(left_edge, det_bin_right) - np.max(right_edge, det_min_left)
+
+                    if bottom_edge <= det_bin_bottom or det_bin_top <= top_edge:
+                        shield_leak *= 0
+                    else:
+                        shield_leak *= np.min(bottom_edge, det_bin_top) - np.max(top_edge, det_min_bottom)
+
+                    expectation[det_bin_x, det_bin_y] += shield_leak
+
+        else:
+
+            # Get mask projection bins
+            right_edge_bin =  np.maximum(self.detector_axes[0].find_bin(right_edge),  0)
+            left_edge_bin =   np.maximum(self.detector_axes[0].find_bin(left_edge),   0)
+            top_edge_bin =    np.maximum(self.detector_axes[1].find_bin(top_edge),    0)
+            bottom_edge_bin = np.maximum(self.detector_axes[1].find_bin(bottom_edge), 0)
+
+            # Mean attenuatuon weights
+            expectation[:] = 1-self.shielding
+            expectation[left_edge_bin:right_edge_bin, bottom_edge_bin:top_edge_bin] = self.open_fraction
+
+            # Weight by pixel area
+            pix_area = self.detector_axes[0].widths.value[:,None] * self.detector_axes[1].widths.value[None,:] 
+
+            expectation *= pix_area
+            
         # Weight by exposure and
         off_axis_angle = np.arccos(coord.to_cartesian().x)
         
@@ -206,7 +296,7 @@ class ToyCodedMaskDetector3D:
             expectation[:] = poisson.rvs(mu = expectation.contents)
         
         return expectation
-
+    
     @property
     def response(self):
         if self._response is None:
@@ -259,7 +349,7 @@ class ToyCodedMaskDetector3D:
 
     
     @u.quantity_input(flux = u.Unit()/u.cm/u.cm/u.s, angle = u.rad, width = u.rad)
-    def gaussian_model(self, flux, coord, width_lon, width_lat, max_sigma = 3):
+    def gaussian_model(self, flux, coord, width_lon, width_lat, max_sigma = 5):
         """
         0 beyond max_sigma
         """
@@ -290,6 +380,8 @@ class ToyCodedMaskDetector3D:
         # Compute
         LON,LAT = np.meshgrid(lon_edges, lat_edges, indexing='ij')
         
+        LON *= np.cos(LAT) # cos for approx phase spase
+
         cdf = dist.cdf(np.transpose([LON,LAT], [1,2,0]))
 
         pdf_int = np.diff(np.diff(cdf, axis = 0), axis = 1)
@@ -322,13 +414,27 @@ class ToyCodedMaskDetector3D:
     
     # ======== 2D bwlow this line =======
     
-    @u.quantity_input(model = u.Unit()/u.m/u.s, duration = u.s)
-    def convolve_model(self, model, duration, fluctuate = True):
+    @u.quantity_input(model = u.Unit()/u.m/u.m/u.s, duration = u.s)
+    def convolve_model(self, model, duration, fluctuate = False, imaging = True):
 
-        expectation = duration*np.dot(self.response.contents, model.contents)
+        expectation = Histogram(self.detector_axes)
+
+        nLon_list, nLat_list = model.contents.nonzero()
+
+        for nLon, nLat, lon, lat in tqdm(zip(nLon_list, nLat_list, model.axes['lon'].centers[nLon_list], model.axes['lat'].centers[nLat_list]),
+                                         total = len(nLon_list)):
         
-        expectation = Histogram(self._det_axis,
-                                contents = expectation.to('').value)
+            flux = model[nLon, nLat]
+
+            coord = UnitSphericalRepresentation(lon = lon, lat = lat)
+
+            psr =  self.point_source_response(flux = flux,
+                                              coord = coord,
+                                              duration = duration,
+                                              fluctuate = fluctuate,
+                                              imaging = imaging)
+
+            expectation += psr
 
         return expectation
 
