@@ -416,7 +416,13 @@ class ToyCodedMaskDetector3D:
         
         # Set containment based on sorted probability
         sorted_prob = np.sort(pdf_int.flatten())[::-1]
-        min_prob = sorted_prob[np.where(np.cumsum(sorted_prob) <= cont)[0][-1]]
+        arg_above_cont = np.where(np.cumsum(sorted_prob) > cont)[0]
+        if len(arg_above_cont) == 0:
+            arg_sort_prob = -1
+        else:
+            arg_sort_prob = arg_above_cont[0]
+            
+        min_prob = sorted_prob[arg_sort_prob]
         pdf_int[pdf_int < min_prob] = 0
 
         # Multiply by flux
