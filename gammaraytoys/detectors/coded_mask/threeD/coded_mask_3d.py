@@ -374,28 +374,21 @@ class ToyCodedMaskDetector3D:
         # Standarize coordinate
         coord = coord.represent_as(UnitSphericalRepresentation)
         
-        if (np.abs(coord.lon) > self.fully_coded_fov[0]) or (np.abs(coord.lon) > self.fully_coded_fov[1]) :
+        if (np.abs(coord.lon) > self.partially_coded_fov[0]) or (np.abs(coord.lon) > self.partially_coded_fov[1]) :
             return 0*u.cm
 
-        # TODO: obtain from 
-        if self._response is not None:
-            # From cache
-            psr = self.response[*self.response.axes['lon','lat'].find_bin(coord.lon, coord.lat)]
-        else:
-            # On the fly
-            psr = self.point_source_response(flux = 1/u.cm/u.cm/u.s,
-                                             coord = coord,
-                                             duration = 1*u.s,
-                                             fluctuate = False)
+        psr = self.point_source_response(flux = 1/u.cm/u.cm/u.s,
+                                         coord = coord,
+                                         duration = 1*u.s,
+                                         fluctuate = False,
+                                         imaging = False)
         
         return np.sum(psr) * u.cm * u.cm
     
-
-    
     @u.quantity_input(flux = u.Unit()/u.cm/u.cm/u.s, angle = u.rad, width = u.rad)
-    def gaussian_model(self, flux, coord, width_lon, width_lat, max_sigma = 5):
+    def gaussian_model(self, flux, coord, width_lon, width_lat, cont = .99):
         """
-        0 beyond max_sigma
+        cont for speed
         """
 
         width_lon = np.maximum(self.angular_resolution/1e6, width_lon)
@@ -406,32 +399,29 @@ class ToyCodedMaskDetector3D:
         dist = multivariate_normal(mean = [coord.lon.to_value(u.rad), coord.lat.to_value(u.rad)],
                                    cov = [[width_lon.to_value(u.rad)**2,0],[0,width_lat.to_value(u.rad)**2]])
 
-        # Mask at 3 sigma for speed
         lon_axis = self.sky_axes['lon']
-        min_lon_bin = np.maximum(0,                  lon_axis.find_bin(coord.lon - max_sigma*width_lon))
-        max_lon_bin = np.minimum(lon_axis.nbins - 1, lon_axis.find_bin(coord.lon + max_sigma*width_lon))
-        lon_edges = lon_axis.edges[min_lon_bin:max_lon_bin+2].to_value(u.rad)
-                                 
+        lon_edges = lon_axis.edges
+        lon_edges = lon_edges.to_value(u.rad)
+        
         lat_axis = self.sky_axes['lat']
-        min_lat_bin = np.maximum(0,                  lat_axis.find_bin(coord.lat - max_sigma*width_lat))
-        max_lat_bin = np.minimum(lat_axis.nbins - 1, lat_axis.find_bin(coord.lat + max_sigma*width_lat))
-        lat_edges = lat_axis.edges[min_lat_bin:max_lat_bin+2].to_value(u.rad)
-
-        if min_lon_bin >= lon_axis.nbins or max_lon_bin < 0 or min_lat_bin >= lat_axis.nbins or max_lat_bin < 0:
-            # Fully outside
-            return model
+        lat_edges = lat_axis.edges
+        lat_edges = lat_edges.to_value(u.rad)
         
         # Compute
         LON,LAT = np.meshgrid(lon_edges, lat_edges, indexing='ij')
-        
-        LON *= np.cos(LAT) # cos for approx phase spase
 
         cdf = dist.cdf(np.transpose([LON,LAT], [1,2,0]))
 
         pdf_int = np.diff(np.diff(cdf, axis = 0), axis = 1)
+        
+        # Set containment based on sorted probability
+        sorted_prob = np.sort(pdf_int.flatten())[::-1]
+        min_prob = sorted_prob[np.where(np.cumsum(sorted_prob) <= cont)[0][-1]]
+        pdf_int[pdf_int < min_prob] = 0
 
-        model[min_lon_bin:max_lon_bin+1, min_lat_bin:max_lat_bin+1] = flux * pdf_int
-
+        # Multiply by flux
+        model[:] = flux * pdf_int
+        
         return model
 
     @u.quantity_input(rate = u.Hz, duration = u.s)
@@ -445,8 +435,6 @@ class ToyCodedMaskDetector3D:
 
         return bkg
 
-    # ======== Tested in 3D above this line ======
-
     @u.quantity_input(flux = u.Unit()/u.cm/u.cm/u.s/u.sr, angle = u.rad, width = u.rad)
     def isotropic_diffuse_model(self, flux):
 
@@ -455,8 +443,6 @@ class ToyCodedMaskDetector3D:
         model[:] = flux * model.axes['lon'].widths[:,None] * (np.sin(model.axes['lat'].upper_bounds) - np.sin(model.axes['lat'].lower_bounds)) * u.rad
 
         return model
-    
-    # ======== 2D bwlow this line =======
     
     @u.quantity_input(model = u.Unit()/u.m/u.m/u.s, duration = u.s)
     def convolve_model(self, model, duration, fluctuate = False, imaging = True):
