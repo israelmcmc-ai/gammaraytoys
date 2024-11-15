@@ -458,7 +458,8 @@ class ToyCodedMaskDetector3D:
         lon_bins, lat_bins = model.contents.nonzero()
 
         for nLon, nLat, lon, lat in tqdm(zip(lon_bins, lat_bins, model.axes['lon'].centers[lon_bins], model.axes['lat'].centers[lat_bins]),
-                                         total = len(lon_bins)):
+                                         total = len(lon_bins),
+                                         desc = "Convolving model..."):
             
             flux = model[nLon, nLat]
 
