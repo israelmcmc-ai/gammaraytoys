@@ -455,11 +455,11 @@ class ToyCodedMaskDetector3D:
 
         expectation = Histogram(self.detector_axes)
 
-        nLon_list, nLat_list = model.contents.nonzero()
+        lon_bins, lat_bins = model.contents.nonzero()
 
-        for nLon, nLat, lon, lat in tqdm(zip(nLon_list, nLat_list, model.axes['lon'].centers[nLon_list], model.axes['lat'].centers[nLat_list]),
-                                         total = len(nLon_list)):
-        
+        for nLon, nLat, lon, lat in tqdm(zip(lon_bins, lat_bins, model.axes['lon'].centers[lon_bins], model.axes['lat'].centers[lat_bins]),
+                                         total = len(lon_bins)):
+            
             flux = model[nLon, nLat]
 
             coord = UnitSphericalRepresentation(lon = lon, lat = lat)
