@@ -396,7 +396,11 @@ class ToyCodedMaskDetector3D:
 
         model = Histogram(self.sky_axes, unit = flux.unit) 
 
-        dist = multivariate_normal(mean = [coord.lon.to_value(u.rad), coord.lat.to_value(u.rad)],
+        lon = coord.lon
+        if lon > 180*u.deg:
+            lon = lon - 360*u.deg
+        
+        dist = multivariate_normal(mean = [lon.to_value(u.rad), coord.lat.to_value(u.rad)],
                                    cov = [[width_lon.to_value(u.rad)**2,0],[0,width_lat.to_value(u.rad)**2]])
 
         lon_axis = self.sky_axes['lon']
