@@ -249,8 +249,10 @@ class ToyTracker2D:
             new_pos = Cartesian2D(new_pos_x, new_pos_y)
 
             # Determine if it interacted based on the total attenuation coefficient
+            # (Beer-Lambert law: survival probability = exp(-optical depth))
             total_attenuation_coeff = self.material.total_attenuation(particle.energy)
-            interaction_prob = np.exp(self.mass_thickness[layer_idx] * total_attenuation_coeff / np.abs(np.sin(particle.direction)))
+            optical_depth = self.mass_thickness[layer_idx] * total_attenuation_coeff / np.abs(np.sin(particle.direction))
+            interaction_prob = 1 - np.exp(-optical_depth)
 
             if np.random.uniform() > interaction_prob:
                 # Didn't interact. Continues flying
