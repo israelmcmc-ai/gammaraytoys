@@ -289,7 +289,7 @@ class ToyTracker2D:
                 # reasonable broadening that illustrates the effect
                 p_electron = None
                 if doppler_broadening:
-                    p_electron = np.random.uniform(-1,1)*expon(scale = 10).rvs()*u.keV
+                    p_electron = np.random.uniform(-1,1)*expon.rvs(scale = 10)*u.keV
                 
                 # Derive the deposited energy from kinematics
                 energy_out = compton_physics.energy_out(scattering_angle, p_electron)
