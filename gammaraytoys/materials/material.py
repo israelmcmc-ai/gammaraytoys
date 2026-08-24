@@ -82,24 +82,25 @@ class Material:
 
         return np.exp(self._total_loginterp(log_energy))*self._coeff_unit
 
-    def plot_attenuation(self, ax = None):
+    def plot_attenuation(self, ax = None, legend = True, *args, **kwargs):
 
         if ax is None:
             fig,ax = plt.subplots()
 
         ax.plot(self._att_energy.to_value(self._energy_unit),
                 self.photo_attenuation(self._att_energy).to_value(self._coeff_unit),
-                label = "Photoelectric absorption")
+                label = "Photoelectric absorption", *args, **kwargs)
 
         ax.plot(self._att_energy.to_value(self._energy_unit),
                 self.pair_attenuation(self._att_energy).to_value(self._coeff_unit),
-                label = "Pair production")
+                label = "Pair production", *args, **kwargs)
 
         ax.plot(self._att_energy.to_value(self._energy_unit),
                 self.compton_attenuation(self._att_energy).to_value(self._coeff_unit),
-                label = "Compton")
+                label = "Compton", *args, **kwargs)
 
-        ax.legend()
+        if legend:
+            ax.legend()
 
         ax.set_xlabel(f"Energy [{self._energy_unit}]")
         ax.set_ylabel(f"Mass attenuation coefficient [{self._coeff_unit}]")

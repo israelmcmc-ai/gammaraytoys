@@ -434,6 +434,36 @@ class ToyCodedMaskDetector3D:
         
         return model
 
+    @u.quantity_input(flux=u.Unit() / u.cm / u.cm / u.s, radius=u.rad)
+    def circle_model(self, flux, coord, radius):
+        """
+        cont for speed
+        """
+
+        radius = np.maximum(self.angular_resolution / 1e6, radius)
+
+        model = Histogram(self.sky_axes, unit=flux.unit)
+
+        lat0 = coord.lat
+        lon0 = coord.lon
+        if lon0 > 180 * u.deg:
+            lon0 = lon0 - 360 * u.deg
+
+        lon_axis = self.sky_axes['lon']
+        lon_centers = lon_axis.centers
+
+        lat_axis = self.sky_axes['lat']
+        lat_centes = lat_axis.centers
+
+        xx,yy = np.meshgrid(lat_centes.to_value(u.rad) - lat0.to_value(u.rad), lon_centers.to_value(u.rad) - lon0.to_value(u.rad))
+
+        mask = (xx**2 + yy**2) < radius.to_value(u.rad)**2
+
+        # Multiply by flux
+        model[mask] = flux / np.sum(mask)
+
+        return model
+
     @u.quantity_input(rate = u.Hz, duration = u.s)
     def uniform_bkg(self, rate, duration):
 
