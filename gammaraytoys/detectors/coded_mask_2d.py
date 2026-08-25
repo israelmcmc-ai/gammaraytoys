@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import astropy.units as u
-from astropy.coordinates import Angle
+from astropy.coordinates import Angle, SkyCoord
 from astropy.units import Quantity
 from scipy.stats import poisson
 from histpy import Histogram, Axis
@@ -207,6 +207,7 @@ class ToyCodedMaskDetector2D:
             # Middle bins. Full
             expectation[det_bin_i+1: det_bin_f] += self.mask[mask_bin] * self._det_axis.widths[det_bin_i+1: det_bin_f]
 
+            
             # Lower edge
             if det_bin_i >= 0:
                 upper_bound = self._det_axis.upper_bounds[det_bin_i]
