@@ -62,3 +62,47 @@ def test_parameter_bounds_contain_optimum():
     lo, hi = grid.parameter_bounds(cont=.9)
 
     assert lo < 2.0 < hi
+
+
+def test_max_ts_is_twice_the_maximum():
+    axis = Axis(np.linspace(-5, 5, 101), label='x')
+    grid = LogLikeGrid(axis)
+
+    grid.compute(lambda x: _neg_quadratic(x))
+
+    assert grid.max_ts() == pytest.approx(2 * grid.maximum())
+
+
+def test_get_ts_thresh_is_max_ts_minus_delta():
+    from scipy.stats import chi2
+
+    axis = Axis(np.linspace(-5, 5, 101), label='x')
+    grid = LogLikeGrid(axis)
+    grid.compute(lambda x: _neg_quadratic(x))
+
+    delta = grid.get_ts_delta(cont=.9)
+    assert delta == pytest.approx(chi2.ppf(.9, df=grid.ndof))
+    assert grid.get_ts_thresh(cont=.9) == pytest.approx(grid.max_ts() - delta)
+
+
+def test_contour_indices_contains_the_optimum_bin():
+    axis = Axis(np.linspace(-5, 5, 101), label='x')
+    grid = LogLikeGrid(axis)
+    grid.compute(lambda x: _neg_quadratic(x))
+
+    argmax = np.argmax(grid.contents)
+
+    contour_idx = grid.contour_indices(cont=.9)
+
+    assert argmax in contour_idx[0]
+
+
+def test_contour_indices_values_bracket_the_optimum():
+    axis = Axis(np.linspace(-5, 5, 101), label='x')
+    grid = LogLikeGrid(axis)
+    grid.compute(lambda x: _neg_quadratic(x))
+
+    _, values = grid.contour_indices_values(cont=.9)
+    values = [v[0] for v in values]
+
+    assert min(values) < 2.0 < max(values)

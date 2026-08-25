@@ -70,3 +70,36 @@ def test_photon_default_chirality_is_plus_or_minus_one():
                     energy=1 * u.MeV)
 
     assert photon.chirality in (1, -1)
+
+
+def test_eventlist_append_and_write(tmp_path):
+    import yaml
+
+    events = EventList()
+    events.nsim = 3
+    events.sim_time = 10 * u.s
+
+    photon1 = Photon(position=Cartesian2D(0 * u.cm, 0 * u.cm),
+                     direction=0 * u.deg, energy=1 * u.MeV, chirality=1)
+    photon2 = Photon(position=Cartesian2D(1 * u.cm, 1 * u.cm),
+                     direction=90 * u.deg, energy=2 * u.MeV, chirality=-1)
+
+    events.append(photon1)
+    events.append(photon2)
+
+    assert events[0] is photon1
+    assert events[1] is photon2
+
+    path = tmp_path / "events.yaml"
+    events.write(str(path))
+
+    # Note: EventList.write() dumps sim_time (an astropy Quantity) as a raw
+    # Python object rather than a plain string like Particle.to_dict() does
+    # for its Quantity fields, so the file isn't loadable with yaml.safe_load.
+    with open(path) as f:
+        loaded = yaml.unsafe_load(f)
+
+    assert loaded['nsim'] == 3
+    assert len(loaded['events']) == 2
+    assert loaded['events'][0]['nevent'] == 0
+    assert loaded['events'][1]['particle_type'] == 'photon'

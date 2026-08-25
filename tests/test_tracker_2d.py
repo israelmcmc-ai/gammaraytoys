@@ -67,3 +67,26 @@ def test_simulate_event_deterministic_with_seed(tracker):
 
     assert result1.hits.nhits == result2.hits.nhits
     assert u.allclose(result1.hits.energy, result2.hits.energy)
+
+
+def test_throwing_plane_is_tangent_and_perpendicular(tracker):
+    plane_origin, throw_parallel = tracker.throwing_plane(0 * u.deg)
+
+    center = tracker.surrounding_circle_center
+    radius = tracker.surrounding_circle_radius
+
+    dist = np.sqrt((plane_origin.x - center.x)**2 + (plane_origin.y - center.y)**2)
+    assert dist.to_value(radius.unit) == pytest.approx(radius.to_value(radius.unit), rel=1e-6)
+
+    # throw_parallel must be perpendicular to the radius vector (tangent
+    # to the surrounding circle) and have the same magnitude as the radius
+    radial = Cartesian2D(plane_origin.x - center.x, plane_origin.y - center.y)
+    dot = (radial.x * throw_parallel.x + radial.y * throw_parallel.y).to_value(radius.unit**2)
+    assert dot == pytest.approx(0, abs=1e-6)
+
+    parallel_mag = np.sqrt(throw_parallel.x**2 + throw_parallel.y**2)
+    assert parallel_mag.to_value(radius.unit) == pytest.approx(radius.to_value(radius.unit), rel=1e-6)
+
+
+def test_throwing_plane_size_is_diameter(tracker):
+    assert tracker.throwing_plane_size == 2 * tracker.surrounding_circle_radius
