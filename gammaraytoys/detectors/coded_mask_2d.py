@@ -63,7 +63,7 @@ class ToyCodedMaskDetector2D:
 
     def effective_area(self, angle):
 
-        if np.abs(angle > self.fully_coded_fov):
+        if np.abs(angle) > self.fully_coded_fov:
             return 0*u.cm
         
         return np.sum(self.response[:, self.sky_axis.find_bin(angle)])

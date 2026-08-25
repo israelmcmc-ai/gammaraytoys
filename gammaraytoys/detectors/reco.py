@@ -8,7 +8,7 @@ class Reconstructor(ABC):
     def reconstruct(self, sim_event):
         pass
 
-class SimpleTraditionalReconstructor(ABC):
+class SimpleTraditionalReconstructor(Reconstructor):
     """
     Top layer is index 0. Assume only another bottom layer composed by everything else.
     """
