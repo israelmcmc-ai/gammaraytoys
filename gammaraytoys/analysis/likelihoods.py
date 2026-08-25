@@ -10,13 +10,18 @@ def poisson_binned_log_likelihood(data, expectation):
     
     return log_like
 
-def unbinned_log_likelihood(data, expectation):
+def unbinned_log_likelihood(expectation_density, total_expectation):
 
     """
-    expectation  = expectation density = expected event per unit of measured phase space
+    Extended unbinned Poisson log-likelihood.
+
+    expectation_density = expectation density -- expected events per unit of
+        measured phase space -- evaluated at each observed data point
+    total_expectation = total expected number of events, i.e. the integral
+        of the expectation density over the full measured phase space
     """
-    
-    log_like = -np.size(data) + np.sum(np.log(expectation))
+
+    log_like = -total_expectation + np.sum(np.log(expectation_density))
 
     return log_like
 
