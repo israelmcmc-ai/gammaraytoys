@@ -3,9 +3,9 @@ from gammaraytoys.coordinates import Cartesian2D
 import numpy as np
 import astropy.units as u
 from .event import Photon
-from copy import copy, deepcopy
+from copy import copy
 import matplotlib.pyplot as plt
-from scipy.stats.sampling import SimpleRatioUniforms, NumericalInverseHermite
+from scipy.stats.sampling import NumericalInverseHermite
 from histpy import Histogram, Axis
 
 class Spectrum(ABC):

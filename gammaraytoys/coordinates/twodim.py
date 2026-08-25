@@ -1,5 +1,4 @@
 from astropy.coordinates import CartesianRepresentation
-from collections import OrderedDict
 
 class Cartesian2D(CartesianRepresentation):
 

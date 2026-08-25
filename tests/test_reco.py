@@ -1,9 +1,7 @@
 import astropy.units as u
 import numpy as np
-import pytest
 
 from gammaraytoys.coordinates import Cartesian2D
-from gammaraytoys.detectors import Interaction, Particle, Photon
 from gammaraytoys.detectors.reco import (Reconstructor,
                                          SimpleTraditionalReconstructor,
                                          RecoCompton)

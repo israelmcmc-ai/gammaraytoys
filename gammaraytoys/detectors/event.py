@@ -1,9 +1,8 @@
 import numpy as np
-from astropy.coordinates import CartesianRepresentation, Angle
+from astropy.coordinates import Angle
 from astropy import units as u
 import yaml
 from gammaraytoys.coordinates import Cartesian2D
-from copy import copy, deepcopy
 
 class EventList:
 

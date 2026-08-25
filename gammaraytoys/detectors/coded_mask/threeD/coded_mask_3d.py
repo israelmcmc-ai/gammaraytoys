@@ -1,13 +1,9 @@
-import matplotlib.pyplot as plt
 import numpy as np
 import astropy.units as u
-from astropy.coordinates import Angle, UnitSphericalRepresentation
-from astropy.units import Quantity
-from scipy.stats import poisson
+from astropy.coordinates import UnitSphericalRepresentation
 from histpy import Histogram, Axis, Axes
-from scipy.stats import poisson, norm
+from scipy.stats import poisson
 from scipy.stats import multivariate_normal
-from scipy.integrate import dblquad
 from tqdm import tqdm
 import sparse
 import h5py as h5

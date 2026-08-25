@@ -3,8 +3,7 @@ import matplotlib as mpl
 import numpy as np
 from gammaraytoys import Material
 from astropy import units as u
-from astropy.coordinates import CartesianRepresentation, Angle
-from .event import Interaction, Particle, Photon, Compton, Absorption, EventList    
+from .event import Photon, Compton, Absorption    
 from gammaraytoys.physics import ComptonPhysics2D
 from gammaraytoys.coordinates import Cartesian2D
 from scipy.stats import norm, expon
@@ -369,8 +368,8 @@ class ToyTracker2D:
 
                     photon.add_parent(compton)
 
-                    # Continue simulation, iterative
-                    child = self.simulate_event(photon)
+                    # Continue simulation, iterative (mutates photon.interaction in place)
+                    self.simulate_event(photon)
 
 
             

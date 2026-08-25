@@ -1,9 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import astropy.units as u
-from astropy.coordinates import Angle, SkyCoord
+from astropy.coordinates import Angle
 from astropy.units import Quantity
-from scipy.stats import poisson
 from histpy import Histogram, Axis
 from scipy.stats import poisson, norm
 

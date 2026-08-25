@@ -1,7 +1,6 @@
 from histpy import Histogram, Axes, Axis
 from astropy import units as u
 import numpy as np
-from .reco import RecoCompton
 from .source import Source
 from tqdm import tqdm
 
