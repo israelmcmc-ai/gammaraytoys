@@ -8,7 +8,6 @@ from .event import Interaction, Particle, Photon, Compton, Absorption, EventList
 from gammaraytoys.physics import ComptonPhysics2D
 from gammaraytoys.coordinates import Cartesian2D
 from scipy.stats import norm, expon
-from copy import copy, deepcopy
 
 class ToyTracker2D:
 
@@ -30,16 +29,31 @@ class ToyTracker2D:
         self._top_bound = np.max(self._layer_pos)
         self._bottom_bound = np.min(self._layer_pos)
 
+        # Plain-float mirrors of the geometry above, in a fixed internal
+        # length unit. simulate_event's hot loop walks the detector doing
+        # scalar arithmetic on these on every layer crossing; using plain
+        # floats there instead of Quantity avoids paying astropy's
+        # unit-conversion machinery on every single operation.
+        self._length_unit = self._layer_pos.unit
+        self._layer_pos_value = self._layer_pos.to_value(self._length_unit)
+        self._left_bound_value = self._left_bound.to_value(self._length_unit)
+        self._right_bound_value = self._right_bound.to_value(self._length_unit)
+        self._top_bound_value = self._top_bound.to_value(self._length_unit)
+        self._bottom_bound_value = self._bottom_bound.to_value(self._length_unit)
+
         self._material = Material.from_name(material)
 
         self._layer_thickness = np.broadcast_to(layer_thickness, self.nlayers, subok=True)
 
         self._mthick = self._layer_thickness * self.material.density
+        self._mthick_unit = self._mthick.unit
+        self._mthick_value = self._mthick.value
         self._energy_res = np.broadcast_to(energy_resolution, self.nlayers)
         self._energy_thresh = np.broadcast_to(energy_threshold, self.nlayers, subok = True)
-        
+
         self._npix = (layer_length/self._layer_thickness).to_value('').astype(int)
         self._pix_size = layer_length/self._npix
+        self._pix_size_value = self._pix_size.to_value(self._length_unit)
 
         det_edges = Cartesian2D(u.Quantity([self.left_bound, self.right_bound, self.left_bound,    self.right_bound]),
                                 u.Quantity([self.top_bound,  self.top_bound,   self.bottom_bound,  self.bottom_bound]))
@@ -204,10 +218,6 @@ class ToyTracker2D:
 
     def simulate_event(self, particle, doppler_broadening = True):
 
-        # We need to copy position since we need to keep track where it is, but we don't want to change the
-        # initial injection position
-        position = copy(particle.position)
-
         # particle.direction is fixed for the whole walk (only position changes
         # between layer crossings), so these only need computing once instead
         # of on every iteration of the loop below.
@@ -220,70 +230,82 @@ class ToyTracker2D:
             # Horizontal particles never cross a layer boundary
             return particle
 
-        tan_direction = np.tan(particle.direction)
-        abs_sin_direction = np.abs(np.sin(particle.direction))
+        tan_direction = np.tan(particle.direction).value
+        abs_sin_direction = np.abs(np.sin(particle.direction)).value
 
         # particle.energy is also fixed for the whole walk (it only changes
         # when a new particle is created after an interaction, which ends
         # this walk), so the attenuation coefficient it determines doesn't
-        # need recomputing on every layer crossing either.
+        # need recomputing on every layer crossing either. Converted once to
+        # a plain float compatible with the cached mass_thickness values (see
+        # below) so the hot loop can do this arithmetic without Quantity
+        # overhead.
         total_attenuation_coeff = self.material.total_attenuation(particle.energy)
+        total_attenuation_coeff_value = total_attenuation_coeff.to_value(1/self._mthick_unit)
+
+        # Track position as plain floats (in the detector's internal length
+        # unit) while walking between layers, instead of a Cartesian2D/
+        # Quantity: rewrapping every intermediate step is unnecessary
+        # overhead when we only need an actual Cartesian2D once we record an
+        # interaction (or never, if the particle exits without interacting).
+        pos_x = particle.position.x.to_value(self._length_unit)
+        pos_y = particle.position.y.to_value(self._length_unit)
 
         while True:
 
             # Terminate events flying out of boundaries
-            if ((position.x >= self.right_bound and flying_right)
+            if ((pos_x >= self._right_bound_value and flying_right)
                 or
-                (position.x <= self.left_bound  and flying_left)
+                (pos_x <= self._left_bound_value  and flying_left)
                 or
-                (position.y >= self.top_bound and flying_up)
+                (pos_y >= self._top_bound_value and flying_up)
                 or
-                (position.y <= self.bottom_bound and flying_down)):
+                (pos_y <= self._bottom_bound_value and flying_down)):
                 break
 
             # Determine interaction location
-            new_pos_x = position.x + (self.layer_positions - position.y)/tan_direction
+            new_pos_x = pos_x + (self._layer_pos_value - pos_y)/tan_direction
 
             # Check only the crosses within the detector, along the flying direction,
             # and excluding the current layer (if the particle starts exactly at a layer)
-            y_dist_to_layers = self.layer_positions - position.y
+            y_dist_to_layers = self._layer_pos_value - pos_y
 
-            crossed_tracker_idx = np.where((new_pos_x < self.right_bound) &
-                                           (new_pos_x > self.left_bound) &
+            crossed_tracker_idx = np.where((new_pos_x < self._right_bound_value) &
+                                           (new_pos_x > self._left_bound_value) &
                                            (y_dist_to_layers > 0 if flying_up else y_dist_to_layers < 0)
                                            )[0]
-            
+
             y_dist_to_crosses = y_dist_to_layers[crossed_tracker_idx] * (-1 if flying_down else 1)
 
             if y_dist_to_crosses.size == 0:
                 # No interactions, flew in between layers
                 break
-            
+
             layer_idx_crossed = np.argmin(y_dist_to_crosses)
-            
+
             layer_idx = crossed_tracker_idx[layer_idx_crossed].item()
 
             new_pos_x = new_pos_x[layer_idx]
-            new_pos_y = self.layer_positions[layer_idx]
-
-            new_pos = Cartesian2D(new_pos_x, new_pos_y)
+            new_pos_y = self._layer_pos_value[layer_idx]
 
             # Determine if it interacted based on the total attenuation coefficient
             # (Beer-Lambert law: survival probability = exp(-optical depth))
-            optical_depth = self.mass_thickness[layer_idx] * total_attenuation_coeff / abs_sin_direction
+            optical_depth = self._mthick_value[layer_idx] * total_attenuation_coeff_value / abs_sin_direction
             interaction_prob = 1 - np.exp(-optical_depth)
 
             if np.random.uniform() > interaction_prob:
                 # Didn't interact. Continues flying
-                position = new_pos
+                pos_x, pos_y = new_pos_x, new_pos_y
                 continue
 
+            new_pos = Cartesian2D(new_pos_x*self._length_unit, new_pos_y*self._length_unit)
+
             # Add measurement error to position
-            pix_size = self._pix_size[layer_idx]
+            pix_size = self._pix_size_value[layer_idx]
             measured_x = (np.floor(new_pos_x/pix_size) + 1/2)*pix_size
             measured_y = new_pos_y
-            measured_pos = Cartesian2D(measured_x,
-                                       measured_y)
+            measured_pos = Cartesian2D(measured_x*self._length_unit,
+                                       measured_y*self._length_unit)
 
             # Determined which interaction type we have. Only Compton or total absorption for now.
 
