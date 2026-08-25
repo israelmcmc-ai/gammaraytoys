@@ -1,23 +1,27 @@
 # TradDet
 
-> **STALE — pending regeneration.** All three `.h5` files in this directory were
-> generated before the interaction-probability bug in
-> `ToyTracker2D.simulate_event` was fixed (see the "Fix inverted interaction
-> probability in ToyTracker2D.simulate_event" commit). That bug made photons
-> interact at essentially the first layer they geometrically crossed
-> regardless of material/thickness/energy, so these cached responses do not
-> reflect the corrected physics. They are being kept for now but should be
-> treated as reference/placeholder data until regenerated.
+> **Regeneration status.** These `.h5` files were originally generated before
+> the interaction-probability bug in `ToyTracker2D.simulate_event` was fixed
+> (see the "Fix inverted interaction probability in ToyTracker2D.simulate_event"
+> commit) -- that bug made photons interact at essentially the first layer
+> they geometrically crossed regardless of material/thickness/energy.
 >
-> Run `regenerate_responses.py` (in this directory) to rebuild them. The
-> script is parallelized across CPU cores and includes the simulator
+> - `response_energy_onaxis_traddet.h5` -- **regenerated** with the fixed
+>   simulator (see "Regenerate response_energy_onaxis_traddet.h5..." commit).
+> - `response_energy_relative_onaxis_traddet.h5`,
+>   `response_imaging_chiral_relative_1MeV_traddet.h5` -- still pending
+>   regeneration as of their last update; check git history for this file to
+>   see if that has since changed.
+>
+> Run `regenerate_responses.py` (in this directory) to (re)build any of them.
+> The script is parallelized across CPU cores and includes the simulator
 > performance fixes from this cleanup (see the script's docstring for
 > details and current timing estimates):
 >
 > ```
-> python regenerate_responses.py energy_onaxis              # ~5 min
-> python regenerate_responses.py energy_relative_onaxis      # ~35-45 min
-> python regenerate_responses.py imaging_chiral_relative      # ~2-2.5 h
+> python regenerate_responses.py energy_onaxis              # ~2 min
+> python regenerate_responses.py energy_relative_onaxis      # ~25-30 min
+> python regenerate_responses.py imaging_chiral_relative      # ~1.5 h
 > ```
 >
 > The last one is still long enough to want a background/overnight job on
