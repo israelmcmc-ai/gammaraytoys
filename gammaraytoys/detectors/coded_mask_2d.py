@@ -25,7 +25,7 @@ class ToyCodedMaskDetector2D:
     @property
     def sky_axis(self):
 
-        if self._response is None:
+        if self._sky_axis is None:
             # Compute and cache
 
             fov = self.partially_coded_fov
@@ -208,34 +208,28 @@ class ToyCodedMaskDetector2D:
             expectation[det_bin_i+1: det_bin_f] += self.mask[mask_bin] * self._det_axis.widths[det_bin_i+1: det_bin_f]
 
             # Lower edge
-            if det_bin_i == -1:
-                upper_bound = self._det_axis.lo_lim
-            else:
+            if det_bin_i >= 0:
                 upper_bound = self._det_axis.upper_bounds[det_bin_i]
-                
-            expectation[det_bin_i] += self.mask[mask_bin] * (upper_bound - mask_proj_edges[mask_bin])
+                expectation[det_bin_i] += self.mask[mask_bin] * (upper_bound - mask_proj_edges[mask_bin])
 
             # Upper edge
-            if det_bin_f == self._det_axis.nbins:
-                lower_bound = self._det_axis.lo_lim
-            else:
+            if det_bin_f < self._det_axis.nbins:
                 lower_bound = self._det_axis.lower_bounds[det_bin_f]
-                
-            expectation[det_bin_f] += self.mask[mask_bin] * (mask_proj_edges[mask_bin+1] - lower_bound)
+                expectation[det_bin_f] += self.mask[mask_bin] * (mask_proj_edges[mask_bin+1] - lower_bound)
 
         # Outside the coded mask
         right_edge = self.mask.axis.hi_lim - np.tan(angle)*self.mask_separation
         right_edge_bin = self.detector_axis.find_bin(right_edge)
         if right_edge_bin < self.detector_axis.nbins:
-            expectation[right_edge_bin] = (1-self.shielding)*(self.detector_axis.upper_bounds[right_edge_bin] - right_edge)
-            expectation[right_edge_bin+1:] = (1-self.shielding)*self.detector_axis.widths[right_edge_bin+1:]
+            expectation[right_edge_bin]    += (1-self.shielding)*(self.detector_axis.upper_bounds[right_edge_bin] - right_edge)
+            expectation[right_edge_bin+1:] += (1-self.shielding)*self.detector_axis.widths[right_edge_bin+1:]
 
         left_edge = self.mask.axis.lo_lim - np.tan(angle)*self.mask_separation
         left_edge_bin = self.detector_axis.find_bin(left_edge)
         if left_edge_bin >= 0:
-            expectation[left_edge_bin] = (1-self.shielding)*(left_edge - self.detector_axis.lower_bounds[left_edge_bin])
+            expectation[left_edge_bin] += (1-self.shielding)*(left_edge - self.detector_axis.lower_bounds[left_edge_bin])
             if left_edge_bin > 0:
-                expectation[:left_edge_bin-1] = (1-self.shielding)*self.detector_axis.widths[:left_edge_bin-1]
+                expectation[:left_edge_bin] += (1-self.shielding)*self.detector_axis.widths[:left_edge_bin]
 
         # Weight by exposure
         expectation *= flux * duration * np.cos(angle) * self._det_eff
