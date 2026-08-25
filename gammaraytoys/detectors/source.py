@@ -34,7 +34,7 @@ class Spectrum(ABC):
         return self.cdf(hi_energy) - self.cdf(lo_energy)
     
     @abstractmethod
-    def random_energy(self):
+    def random_energy(self, size = None):
         pass
 
 class MonoenergeticSpectrum(Spectrum):
@@ -56,9 +56,12 @@ class MonoenergeticSpectrum(Spectrum):
     def cdf(self, energy):
         return (np.array(energy >= self.energy, dtype = int)+1)/2
 
-    def random_energy(self):
+    def random_energy(self, size = None):
 
-        return self.energy
+        if size is None:
+            return self.energy
+
+        return np.full(size, self.energy.value) * self.energy.unit
 
 class PowerLawSpectrum(Spectrum):
 
@@ -154,6 +157,7 @@ class MultiComponentSpectrum(Spectrum):
         self._min_energy = np.min(u.Quantity([c.min_energy for c in components]))
         self._max_energy = np.max(u.Quantity([c.max_energy for c in components]))
         
+    @property
     def ncomponents(self):
         return len(self.components)
         
@@ -168,17 +172,22 @@ class MultiComponentSpectrum(Spectrum):
     def random_energy(self, size = None):
 
         component_idx = np.random.choice(self.ncomponents, size = size, p = self.weights)
-        
+
         energies = []
-        
+
         for ncomponent in range(self.ncomponents):
-            
+
             nsamples = np.sum(component_idx == ncomponent)
-            
-            energies.append(self.components[component_idx].random_energy(size = nsamples))
-            
-        energies = u.Quantity(np.shuffle(energies))
-        
+
+            energies.append(self.components[ncomponent].random_energy(size = nsamples))
+
+        energies = u.Quantity(np.concatenate(energies))
+
+        # Undo the grouping by component above -- shuffle indices rather than
+        # the array itself, since np.random.shuffle isn't guaranteed to
+        # preserve the Quantity subclass/unit in place.
+        energies = energies[np.random.permutation(energies.size)]
+
         return energies
 
     def pdf(self, energy):

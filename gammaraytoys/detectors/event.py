@@ -37,7 +37,7 @@ class Hits:
         if layer is None:
 
             if position is not None or energy is not None:
-                RuntimeError("Layer, position and energy should have the same size")
+                raise RuntimeError("Layer, position and energy should have the same size")
             
             layer = np.array([], dtype = int)
             position = Cartesian2D([]*u.mm, []*u.mm)
