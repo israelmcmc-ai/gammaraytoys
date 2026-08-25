@@ -304,10 +304,7 @@ def regenerate_imaging_chiral_relative(
 ):
     """
     Chirality-resolved imaging response (ARM/Phi/Zeta vs off-axis angle Nu) at
-    1 MeV. Matches docs/tutorials/07-unbinned_ts_map.ipynb (the "In[1]" restart
-    section, i.e. the second detector/axis definition in that notebook -- the
-    notebook itself is exploratory and out of linear order, this script is the
-    reproducible pipeline).
+    1 MeV, as consumed by docs/tutorials/07-unbinned_ts_map.ipynb.
 
     Parallelized one off-axis angle bin per worker (bins are independent).
     """
