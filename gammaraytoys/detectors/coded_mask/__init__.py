@@ -1,2 +1,2 @@
-from .threeD import ToyCodedMaskDetector3D
-
+from .coded_mask_2d import ToyCodedMaskDetector2D
+from .coded_mask_3d import ToyCodedMaskDetector3D
