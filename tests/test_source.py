@@ -23,15 +23,27 @@ def test_monoenergetic_sized_draw():
     assert u.allclose(energies, 5 * u.MeV)
 
 
-@pytest.mark.xfail(reason="Known bug: MonoenergeticSpectrum.cdf() returns 0.5/1.0 "
-                          "instead of 0.0/1.0, silently dropping half the flux "
-                          "when the spectrum is discretized. Not yet fixed.",
-                   strict=True)
 def test_monoenergetic_cdf_step():
     spec = MonoenergeticSpectrum(5 * u.MeV)
 
     assert spec.cdf(4 * u.MeV) == 0
     assert spec.cdf(6 * u.MeV) == 1
+    assert spec.cdf(5 * u.MeV) == 1
+
+
+def test_monoenergetic_integrate_conserves_flux_across_bins():
+    # Regression test: cdf() used to return 0.5/1.0 instead of 0.0/1.0,
+    # so integrating over a set of contiguous bins covering the line only
+    # recovered half of its flux instead of all of it.
+    spec = MonoenergeticSpectrum(5 * u.MeV)
+
+    lo = np.array([0, 4, 6]) * u.MeV
+    hi = np.array([4, 6, 10]) * u.MeV
+
+    bin_integrals = spec.integrate(lo, hi)
+
+    assert np.sum(bin_integrals) == pytest.approx(1)
+    np.testing.assert_array_equal(bin_integrals, [0, 1, 0])
 
 
 def test_powerlaw_pdf_integrates_to_one():

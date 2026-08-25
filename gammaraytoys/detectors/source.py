@@ -54,7 +54,7 @@ class MonoenergeticSpectrum(Spectrum):
         raise ValueError("Do not use PDF for Mono, only CDF")
         
     def cdf(self, energy):
-        return (np.array(energy >= self.energy, dtype = int)+1)/2
+        return np.array(energy >= self.energy, dtype = int)
 
     def random_energy(self, size = None):
 
