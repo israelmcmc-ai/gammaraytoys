@@ -21,6 +21,15 @@ class ToyTracker2D:
 
         self._layer_pos = layer_positions
 
+        # Cache these: they're pure functions of the (immutable) constructor
+        # inputs above, but get accessed on every layer crossing during
+        # event simulation, so recomputing them on every property access
+        # (Quantity arithmetic / np.max/np.min over the layer array) adds up.
+        self._left_bound = -self._size/2
+        self._right_bound = self._size/2
+        self._top_bound = np.max(self._layer_pos)
+        self._bottom_bound = np.min(self._layer_pos)
+
         self._material = Material.from_name(material)
 
         self._layer_thickness = np.broadcast_to(layer_thickness, self.nlayers, subok=True)
@@ -86,19 +95,19 @@ class ToyTracker2D:
 
     @property
     def left_bound(self):
-        return -self.size/2
+        return self._left_bound
 
     @property
     def right_bound(self):
-        return self.size/2
+        return self._right_bound
 
     @property
     def top_bound(self):
-        return np.max(self.layer_positions)
-    
+        return self._top_bound
+
     @property
     def bottom_bound(self):
-        return np.min(self.layer_positions)
+        return self._bottom_bound
 
     @property
     def surrounding_circle_radius(self):
@@ -199,12 +208,28 @@ class ToyTracker2D:
         # initial injection position
         position = copy(particle.position)
 
+        # particle.direction is fixed for the whole walk (only position changes
+        # between layer crossings), so these only need computing once instead
+        # of on every iteration of the loop below.
+        flying_up = particle.direction < 180*u.deg
+        flying_down = not flying_up
+        flying_right = particle.direction < 90*u.deg or particle.direction > 270*u.deg
+        flying_left = not flying_right
+
+        if particle.direction == 0*u.deg or particle.direction == 180*u.deg:
+            # Horizontal particles never cross a layer boundary
+            return particle
+
+        tan_direction = np.tan(particle.direction)
+        abs_sin_direction = np.abs(np.sin(particle.direction))
+
+        # particle.energy is also fixed for the whole walk (it only changes
+        # when a new particle is created after an interaction, which ends
+        # this walk), so the attenuation coefficient it determines doesn't
+        # need recomputing on every layer crossing either.
+        total_attenuation_coeff = self.material.total_attenuation(particle.energy)
+
         while True:
-            
-            flying_up = particle.direction < 180*u.deg
-            flying_down = not flying_up
-            flying_right = particle.direction < 90*u.deg or particle.direction > 270*u.deg
-            flying_left = not flying_right
 
             # Terminate events flying out of boundaries
             if ((position.x >= self.right_bound and flying_right)
@@ -216,13 +241,8 @@ class ToyTracker2D:
                 (position.y <= self.bottom_bound and flying_down)):
                 break
 
-            # Terminate horizontal particles
-            if particle.direction == 0*u.deg or particle.direction == 180*u.deg:
-                # No interactions, flew in between layers
-                break
-            
             # Determine interaction location
-            new_pos_x = position.x + (self.layer_positions - position.y)/np.tan(particle.direction)
+            new_pos_x = position.x + (self.layer_positions - position.y)/tan_direction
 
             # Check only the crosses within the detector, along the flying direction,
             # and excluding the current layer (if the particle starts exactly at a layer)
@@ -250,8 +270,7 @@ class ToyTracker2D:
 
             # Determine if it interacted based on the total attenuation coefficient
             # (Beer-Lambert law: survival probability = exp(-optical depth))
-            total_attenuation_coeff = self.material.total_attenuation(particle.energy)
-            optical_depth = self.mass_thickness[layer_idx] * total_attenuation_coeff / np.abs(np.sin(particle.direction))
+            optical_depth = self.mass_thickness[layer_idx] * total_attenuation_coeff / abs_sin_direction
             interaction_prob = 1 - np.exp(-optical_depth)
 
             if np.random.uniform() > interaction_prob:
