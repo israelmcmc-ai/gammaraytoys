@@ -26,7 +26,7 @@ class EventList:
 
         with open(filename, 'w') as f:
             yaml.dump(dict(nsim = self.nsim,
-                           sim_time = self.sim_time,
+                           sim_time = str(self.sim_time) if self.sim_time is not None else None,
                            events = [{'nevent':n} | e.to_dict() for n,e in enumerate(self._events)]),
                       f, sort_keys=False)
 
