@@ -93,13 +93,31 @@ def test_eventlist_append_and_write(tmp_path):
     path = tmp_path / "events.yaml"
     events.write(str(path))
 
-    # Note: EventList.write() dumps sim_time (an astropy Quantity) as a raw
-    # Python object rather than a plain string like Particle.to_dict() does
-    # for its Quantity fields, so the file isn't loadable with yaml.safe_load.
+    # Regression test: sim_time (an astropy Quantity) used to be dumped as
+    # a raw Python object instead of a string like Particle.to_dict() does
+    # for its Quantity fields, making the file unloadable with
+    # yaml.safe_load.
     with open(path) as f:
-        loaded = yaml.unsafe_load(f)
+        loaded = yaml.safe_load(f)
 
     assert loaded['nsim'] == 3
+    assert loaded['sim_time'] == str(10 * u.s)
     assert len(loaded['events']) == 2
     assert loaded['events'][0]['nevent'] == 0
     assert loaded['events'][1]['particle_type'] == 'photon'
+
+
+def test_eventlist_write_with_no_sim_time(tmp_path):
+    import yaml
+
+    events = EventList()
+
+    path = tmp_path / "events_empty.yaml"
+    events.write(str(path))
+
+    with open(path) as f:
+        loaded = yaml.safe_load(f)
+
+    assert loaded['nsim'] is None
+    assert loaded['sim_time'] is None
+    assert loaded['events'] == []
