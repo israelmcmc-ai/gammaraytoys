@@ -1,10 +1,8 @@
 import astropy.units as u
-import numpy as np
 import pytest
 
 from gammaraytoys.coordinates import Cartesian2D
-from gammaraytoys.detectors import (Interaction, Particle, Photon, Compton,
-                                    Absorption, EventList)
+from gammaraytoys.detectors import (Interaction, Photon, Absorption, EventList)
 from gammaraytoys.detectors.event import Hits
 
 

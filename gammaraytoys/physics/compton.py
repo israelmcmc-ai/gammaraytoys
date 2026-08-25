@@ -2,7 +2,7 @@ import astropy.units as u
 import astropy.constants as c
 import numpy as np
 from scipy.stats.sampling import SimpleRatioUniforms
-from histpy import Histogram,Axis
+from histpy import Axis
 import matplotlib.pyplot as plt
 
 _electron_mass = (c.m_e * c.c * c.c).to(u.keV)

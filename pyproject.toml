@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gammaraytoys"
+dynamic = ["version"]
+description = "Simple toy example to teaching gamma-ray analysis techniques"
+readme = "README.md"
+authors = [
+    { name = "Israel Martinez", email = "imc@umd.edu" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "histpy",
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "astropy",
+    "pandas",
+    "mhealpy",
+    "pyyaml",
+    "tqdm",
+]
+
+[project.urls]
+Homepage = "https://github.com/israelmcmc/gammaraytoys"
+
+[project.optional-dependencies]
+test = ["pytest"]
+lint = ["ruff"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gammaraytoys._version.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["gammaraytoys", "gammaraytoys.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# Tutorial/example notebooks are pedagogical, cell-order-dependent material,
+# not library code -- hold them to the reader's narrative, not a linter.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+# Start narrow: undefined names and unused imports/variables are
+# unambiguous bugs. The codebase's existing style (no docstrings, terse
+# formatting) isn't enforced here to avoid a repo-wide reformat as a side
+# effect of adding CI.
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Every re-export in an __init__.py is "unused" by static analysis but is
+# the whole point of the file.
+"__init__.py" = ["F401"]

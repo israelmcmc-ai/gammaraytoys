@@ -102,7 +102,6 @@ def test_multicomponent_random_energy_mixed_component_types():
 
 
 def test_multicomponent_pdf_is_weighted_sum():
-    mono_energy = 5 * u.MeV
     powerlaw = PowerLawSpectrum(index=-2, min_energy=1 * u.MeV, max_energy=10 * u.MeV)
     spec = MultiComponentSpectrum(powerlaw, powerlaw, weights=[0.25, 0.75])
 

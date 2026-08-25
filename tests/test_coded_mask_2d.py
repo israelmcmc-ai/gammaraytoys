@@ -1,6 +1,4 @@
 import astropy.units as u
-import numpy as np
-import pytest
 
 
 def test_effective_area_zero_outside_fully_coded_fov(mask_detector):
