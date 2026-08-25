@@ -6,21 +6,23 @@
 > probability in ToyTracker2D.simulate_event" commit). That bug made photons
 > interact at essentially the first layer they geometrically crossed
 > regardless of material/thickness/energy, so these cached responses do not
-> reflect the corrected physics. They are being kept for now (regenerating
-> the two larger ones takes hours — see below) but should be treated as
-> reference/placeholder data until regenerated.
+> reflect the corrected physics. They are being kept for now but should be
+> treated as reference/placeholder data until regenerated.
 >
-> Run `regenerate_responses.py` (in this directory) to rebuild them:
+> Run `regenerate_responses.py` (in this directory) to rebuild them. The
+> script is parallelized across CPU cores and includes the simulator
+> performance fixes from this cleanup (see the script's docstring for
+> details and current timing estimates):
 >
 > ```
-> python regenerate_responses.py energy_onaxis              # ~30 min
-> python regenerate_responses.py energy_relative_onaxis      # ~4-5 h
-> python regenerate_responses.py imaging_chiral_relative      # ~14-16 h
+> python regenerate_responses.py energy_onaxis              # ~5 min
+> python regenerate_responses.py energy_relative_onaxis      # ~35-45 min
+> python regenerate_responses.py imaging_chiral_relative      # ~2-2.5 h
 > ```
 >
-> The two longer ones are only practical as background/overnight jobs, and
-> are good candidates to re-time after the simulator performance work planned
-> for this cleanup — see the repo's cleanup notes.
+> The last one is still long enough to want a background/overnight job on
+> most machines (`nohup ... &`, see the script's docstring), but is no
+> longer the multi-day proposition it would have been pre-optimization.
 
 The "traditional detector" corresponds to
 

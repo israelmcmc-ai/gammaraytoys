@@ -12,14 +12,18 @@ without hand-copying code out of the notebooks.
 Work is parallelized across processes (one independent simulation chunk/bin
 per worker; results are combined in the parent), since each bin/chunk is
 statistically independent. Approximate runtimes on 4 cores, post-fix
-(Beer-Lambert correction + Compton Doppler sampling fix), on-axis Ge tracker:
-  - energy_onaxis            ~10 min  (ntrig=10000 split across workers)
-  - energy_relative_onaxis   ~1-1.5 h (25 photon-energy bins, ntrig=4000 each)
-  - imaging_chiral_relative  ~4-5 h   (17 offaxis-angle bins, ntrig=20000 each)
+(Beer-Lambert correction, Compton Doppler sampling fix, and simulate_event
+loop-invariant hoisting -- see git history for this file), on-axis Ge tracker:
+  - energy_onaxis            ~5 min    (ntrig=10000 split across workers)
+  - energy_relative_onaxis   ~35-45 min (25 photon-energy bins, ntrig=4000 each)
+  - imaging_chiral_relative  ~2-2.5 h  (17 offaxis-angle bins, ntrig=20000 each)
 
-(Single-core baseline was ~30 min / ~4-5 h / ~14-16 h -- see git history for
-this file. Scale roughly with min(bins, workers) additional speedup from more
-cores, up to the number of independent bins.)
+(Original single-core, pre-optimization baseline was ~30 min / ~4-5 h /
+~14-16 h. These are estimates extrapolated from per-event profiling and a
+partial timed run, not a full timed run of each target -- expect some
+variance, particularly for imaging_chiral_relative since trigger efficiency
+varies by off-axis angle. Scale roughly with min(bins, workers) additional
+speedup from more cores, up to the number of independent bins.)
 
 The larger ones are still impractical for an interactive session; run them
 with nohup/tmux/a background job, e.g.:
