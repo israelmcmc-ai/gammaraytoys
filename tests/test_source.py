@@ -2,8 +2,8 @@ import astropy.units as u
 import numpy as np
 import pytest
 
-from gammaraytoys.detectors import (MonoenergeticSpectrum, PowerLawSpectrum,
-                                    MultiComponentSpectrum)
+from gammaraytoys.sims import (MonoenergeticSpectrum, PowerLawSpectrum,
+                               MultiComponentSpectrum)
 
 
 def test_monoenergetic_scalar_draw():

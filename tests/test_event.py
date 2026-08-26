@@ -2,8 +2,8 @@ import astropy.units as u
 import pytest
 
 from gammaraytoys.coordinates import Cartesian2D
-from gammaraytoys.detectors import (Interaction, Photon, Absorption, EventList)
-from gammaraytoys.detectors.event import Hits
+from gammaraytoys.sims import (Interaction, Photon, Absorption, EventList)
+from gammaraytoys.sims.event import Hits
 
 
 def test_hits_mismatched_size_raises():

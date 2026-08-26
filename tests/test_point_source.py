@@ -2,9 +2,9 @@ import astropy.units as u
 import numpy as np
 import pytest
 
-from gammaraytoys.detectors import (PointSource, IsotropicSource,
-                                    MonoenergeticSpectrum, PowerLawSpectrum,
-                                    Photon)
+from gammaraytoys.sims import (PointSource, IsotropicSource,
+                               MonoenergeticSpectrum, PowerLawSpectrum,
+                               Photon)
 
 
 def test_pointsource_flux_from_pivot():

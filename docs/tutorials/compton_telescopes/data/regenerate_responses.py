@@ -46,7 +46,7 @@ import astropy.units as u
 from histpy import Histogram, Axis
 
 from gammaraytoys import ToyTracker2D
-from gammaraytoys.detectors import (
+from gammaraytoys.sims import (
     Simulator,
     SimpleTraditionalReconstructor,
     PointSource,
