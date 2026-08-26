@@ -2,7 +2,7 @@
 
 Simple toy example to teaching gamma-ray analysis techniques
 
-Follow the tutorials (Jupyter notebooks) in docs/tutorials.
+Follow the tutorials (Jupyter notebooks) in docs/tutorials/compton_telescopes.
 
 ## Installation
 
