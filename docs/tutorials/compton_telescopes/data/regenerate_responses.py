@@ -109,7 +109,7 @@ def regenerate_energy_onaxis(
 ):
     """
     On-axis spectral response, R(Em; Ei), for a power-law source (index -1).
-    Matches docs/tutorials/03-instrument_response.ipynb.
+    Matches docs/tutorials/compton_telescopes/03-instrument_response.ipynb.
     """
 
     det = _traditional_detector()
