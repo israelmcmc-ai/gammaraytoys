@@ -715,3 +715,13 @@ Collected from reading the existing code and probing it. Each has bitten or will
    below. Do not "fix" it.
 10. **`arcsin(a/s)` breaks for `s < a`.** A near source inside the surrounding circle
     needs the separate branch of §5.4.
+11. **`doppler_broadening` deliberately does not reach scattered photons.**
+    `simulate_event()` recurses without passing the flag down, so only the first
+    interaction honours it and everything after is always broadened. This was
+    identified as a bug, and left in place on purpose: the broadening is a fudge to
+    illustrate the effect, not a real Doppler model, so the inconsistency costs
+    nothing pedagogically, while fixing it would invalidate the cached instrument
+    responses under `docs/tutorials/compton_telescopes/data/` and would first need
+    somebody to confirm the fudge behaves for the low-energy secondaries it would
+    newly apply to. The reasoning is in a comment at the call site. **Do not "fix"
+    it** as a drive-by while working on anything in this plan.
