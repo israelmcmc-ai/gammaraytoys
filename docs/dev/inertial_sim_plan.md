@@ -47,6 +47,10 @@ These are not negotiable without asking the maintainer first.
    PR, and wait. Group two features only when both are small and obviously related,
    and say why in the PR description. A single large PR needs justifying up front.
 6. **Every PR carries tests and, where §7 says so, a notebook.**
+7. **Every class and every method carries a docstring.** What it does, what its
+   arguments mean including their expected units, and what it returns. This is
+   teaching material as much as it is code; an undocumented public method is
+   incomplete, not merely untidy.
 
 
 ## 3. Conventions
@@ -70,8 +74,9 @@ symbol for spacecraft geometry.** Use these names, in code and in comments:
 | Source direction on the inertial sky | `sky_angle` | λ | CCW from inertial +X, pointing *toward* the source |
 | Spacecraft attitude | `attitude` | A | Inertial angle of the detector's **+y** axis, CCW from inertial +X |
 | Spacecraft orbital position angle | `orbit_angle` | θ | CCW from inertial +X, Earth centre at the origin |
-| Spacecraft orbital radius | `radius` | r | From Earth centre |
-| Earth angular radius from the SC | — | ρ | `arcsin(R_E / r)` |
+| Spacecraft orbital radius | `orbit_radius` | r | From Earth centre |
+| Earth radius | `Earth.radius` | R_E | Defaults to astropy's `R_earth` |
+| Earth angular radius from the SC | `Earth.angular_radius(...)` | ρ | `arcsin(R_E / r)`, always < 90° since r > R_E |
 | Off-axis angle in the detector frame | `offaxis_angle` | Nu | Existing convention, unchanged |
 
 ### 3.3 Frames
@@ -129,9 +134,15 @@ transform is wrong.
 ### 3.5 Units
 
 Times in seconds, orbital distances in km, detector distances in cm/mm, energies in
-MeV/keV. Everything stays an `astropy` `Quantity` at API boundaries. Inside hot loops
-the existing code drops to plain floats in a fixed unit; follow that pattern only
-where it already exists.
+MeV/keV.
+
+**Follow this pattern in every user-facing method**, the way
+`ToyTracker2D.simulate_event()` already does: accept and return `astropy` `Quantity`
+objects at the API boundary, then convert once to plain floats in a fixed internal
+unit and do the arithmetic on those. Quantity operations are expensive — profiling
+`IsotropicSource.random_photon` puts 57% of its runtime inside astropy's `Quantity`
+and `CartesianRepresentation` machinery — so a method that keeps units live through
+an inner loop pays for them on every operation. Convert at the door, not in the loop.
 
 
 ## 4. The spacecraft history file (`.ori`)
@@ -142,7 +153,7 @@ A CSV file with a `.ori` extension. One header line, units baked into the column
 names. `#` starts a comment line; blank lines ignored.
 
 ```
-time_s,radius_km,orbit_angle_deg,attitude_deg,uptime_s
+time_s,orbit_radius_km,orbit_angle_deg,attitude_deg,uptime_s
 0.0,6771.0,0.0,90.0,9.5
 10.0,6771.0,0.081,90.081,10.0
 20.0,6771.0,0.162,90.162,7.2
@@ -157,7 +168,7 @@ Rows define timestamps `t_0 < t_1 < ... < t_N`. There are **N intervals**, not N
 Interval `i` spans `[t_i, t_{i+1})` and takes **both its pose and its uptime from
 row i**. Concretely:
 
-- pose (radius, orbit_angle, attitude) = row `i`
+- pose (orbit_radius, orbit_angle, attitude) = row `i`
 - livetime `L_i` = row `i`'s `uptime_s`
 - span `Δt_i = t_{i+1} - t_i`
 
@@ -173,7 +184,7 @@ Validation on read, all of which must raise with a clear message:
 - timestamps strictly increasing
 - at least 2 rows
 - `0 <= L_i <= Δt_i` for every interval
-- `radius > 0`
+- `orbit_radius > earth.radius`
 
 ### 4.3 API
 
@@ -184,10 +195,15 @@ class SpacecraftHistory:
     def write(self, filename): ...
 
     @classmethod
-    def from_elliptical_orbit(cls, semi_major_axis, eccentricity, earth,
-                              attitude_model, time_step, duration = None,
+    def from_elliptical_orbit(cls, semi_major_axis,
+                              eccentricity = 0.0,
+                              earth = None,
+                              observation_strategy = None,
+                              time_step = 1*u.s,
+                              duration = None,
                               argument_of_periapsis = 0*u.deg,
-                              initial_time = 0*u.s, livetime_fraction = 1.0): ...
+                              initial_time = 0*u.s,
+                              livetime_fraction = 1.0): ...
 
     @property
     def nintervals(self): ...      # = nrows - 1
@@ -198,7 +214,20 @@ class SpacecraftHistory:
 ```
 
 `SpacecraftInterval` is a small frozen dataclass: `start_time`, `stop_time`,
-`livetime`, `radius`, `orbit_angle`, `attitude`, plus a `mid_time` property.
+`livetime`, `orbit_radius`, `orbit_angle`, `attitude`, plus a `mid_time` property.
+
+Defaults, all overridable:
+
+- `time_step = 1*u.s`
+- `eccentricity = 0.0` — a circular orbit, the simplest case to reason about
+- `earth = None`, meaning `Earth()`, which itself defaults to astropy's `R_earth`.
+  The `Earth` instance is used for the perigee check below; the gravitational
+  parameter μ comes from `astropy.constants` directly.
+- `observation_strategy = None`, meaning `ZenithPointing()`
+- `duration = None`, meaning one full orbital period
+
+Raise if the perigee `a(1-e)` falls below `earth.radius` — an orbit through the
+planet is a configuration error, not something to simulate.
 
 ### 4.4 Orbit generation
 
@@ -220,7 +249,9 @@ fails to converge rather than silently returning garbage.
 
 `duration` defaults to one full orbital period.
 
-Attitude models, as small callables `(time, radius, orbit_angle) -> attitude`:
+Observation strategies, as small callables `(time, orbit_radius, orbit_angle) -> attitude`.
+They are what a mission planner chooses, hence the name: `observation_strategy`, not
+`attitude_model`.
 
 - `ZenithPointing()` — detector +y points radially outward: `A = θ`
 - `NadirPointing()` — `A = θ + 180°`
@@ -235,9 +266,9 @@ per row.
 
 ```python
 class Earth:
-    def __init__(self, radius = None): ...          # defaults to astropy's R_earth
-    def angular_radius(self, spacecraft_radius): ...      # rho = arcsin(R/r)
-    def is_occulted(self, sky_angle, orbit_angle, spacecraft_radius): ...
+    def __init__(self, radius = None): ...                # defaults to astropy's R_earth
+    def angular_radius(self, orbit_radius): ...           # rho = arcsin(R_E/r)
+    def is_occulted(self, sky_angle, orbit_angle, orbit_radius): ...
     def plot(self, ax = None): ...
 ```
 
@@ -251,7 +282,7 @@ nadir = orbit_angle + 180 deg
 occulted  <=>  |wrap(λ - nadir)| < rho
 ```
 
-Raise if `spacecraft_radius < radius`.
+Raise if `orbit_radius <= self.radius`.
 
 
 ## 5. Source model
@@ -363,8 +394,16 @@ which is exact in the small-width limit. Say so in the docstring. Sample with
 `scipy.stats.vonmises` (already available through the existing scipy dependency).
 `flux` is the total integrated over the whole sky.
 
-Two limits fall out for free and both belong in the tests: `width → ∞` (κ → 0) must
-reproduce `IsotropicSource`, and `width → 0` must reproduce `PointSource`.
+**Two limiting cases must have their own explicit unit tests**, not merely be
+mentioned. They are the cheapest possible check that the normalisation convention
+above is implemented correctly, and they catch a whole class of factor-of-2π errors:
+
+- `test_extended_source_wide_limit_matches_isotropic` — at large `width` (κ → 0), both
+  `simulated_rate()` and the distribution of drawn sky angles must match
+  `IsotropicSource` at the same flux.
+- `test_extended_source_narrow_limit_matches_point` — at small `width`, both
+  `simulated_rate()` and the drawn sky angles must match `PointSource` at the same
+  flux and sky angle.
 
 ### 5.6 `EarthAlbedoSource`
 
@@ -409,6 +448,21 @@ cos θ(β)  = (r cos β - R_E) / s(β)                    # emission angle from 
   at the limb (integrably, as ε^(-1/2)). **Sample in β, never in sky angle** — the
   surface measure removes the divergence entirely. Draw β from
   `pdf(β) ∝ 1/s(β)` on `[-β_max, β_max]`, then convert to a sky angle.
+
+  Note that the spacecraft being above the surface does **not** remove this
+  divergence, and it is worth being precise about why, because two different angles
+  are easy to conflate. The Earth's *apparent* angular radius ρ is indeed always
+  below 90° and shrinks with altitude — 79.9° at 100 km, 1.2° at 300 000 km. But the
+  divergent quantity is θ, the emission angle at the *surface point*, and at the
+  visible limb the line of sight is tangent to the surface, so θ is exactly 90° and
+  `cos θ` exactly 0 at **every** altitude. Substituting `β_max = arccos(R_E/r)` into
+  `cos θ(β)` above gives `(r · R_E/r - R_E)/s = 0` identically, with no dependence on
+  `r`.
+
+  None of which matters in practice, because sampling in β never evaluates `1/cos θ`
+  at all: `pdf(β) ∝ 1/s(β)` is smooth and bounded on the whole domain, with
+  `s ≥ r - R_E > 0`. The divergence is described here only to explain why the sampler
+  is written in β rather than in sky angle — do not "simplify" it back.
 
 For the isotropic sampler, tabulate the pdf on a β grid, build the CDF with
 `scipy.integrate.cumulative_trapezoid`, and inverse-transform with `np.interp`. About
