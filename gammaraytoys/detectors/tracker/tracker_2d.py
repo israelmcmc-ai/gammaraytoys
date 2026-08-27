@@ -368,8 +368,11 @@ class ToyTracker2D:
 
                     photon.add_parent(compton)
 
-                    # Continue simulation, iterative (mutates photon.interaction in place)
-                    self.simulate_event(photon)
+                    # Continue simulation, iterative (mutates photon.interaction in place).
+                    # The doppler flag has to be passed down explicitly, otherwise
+                    # every scattered photon falls back to the default and gets
+                    # broadened even when the caller asked for no broadening.
+                    self.simulate_event(photon, doppler_broadening = doppler_broadening)
 
 
             

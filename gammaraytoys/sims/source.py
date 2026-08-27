@@ -125,9 +125,14 @@ class PointSource(Source):
             else:
                 self._flux = (flux_pivot/spectrum.pdf(pivot_energy)).to(1/u.cm/u.s)
 
-        #cache
-        self._plane_origin = None
+        # Cache for the throwing plane, which is a pure function of the detector
+        # and the off-axis angle. Both can change between photons -- IsotropicSource
+        # points a single PointSource somewhere new for every draw -- so the cache
+        # is keyed on both, not on the detector alone.
         self._detector = None
+        self._cached_offaxis_angle = None
+        self._plane_origin = None
+        self._throw_parallel = None
 
     @property
     def flux(self):
@@ -139,8 +144,9 @@ class PointSource(Source):
 
     def random_injection_position(self, detector):
 
-        if detector is not self._detector:
+        if detector is not self._detector or self.offaxis_angle != self._cached_offaxis_angle:
             self._detector = detector
+            self._cached_offaxis_angle = self.offaxis_angle
             self._plane_origin, self._throw_parallel = detector.throwing_plane(self.offaxis_angle)
 
         perp_norm_dist = np.random.uniform(-1,1)
@@ -169,6 +175,13 @@ class IsotropicSource(Source):
         self.chirality_degree = chirality_degree
         self._flux = flux
 
+        # A single point source that gets aimed somewhere new for every photon,
+        # rather than a throw-away PointSource per photon.
+        self._point_source = PointSource(offaxis_angle = 0*u.deg,
+                                         spectrum = spectrum,
+                                         chirality = chirality,
+                                         chirality_degree = chirality_degree)
+
     @property
     def flux(self):
         return self._flux
@@ -179,11 +192,10 @@ class IsotropicSource(Source):
 
     def random_photon(self, detector):
 
-        direction = np.random.uniform(0,360)*u.deg
+        # Re-sync in case these were changed after construction
+        self._point_source.chirality = self.chirality
+        self._point_source.chirality_degree = self.chirality_degree
 
-        ps = PointSource(offaxis_angle = direction,
-                         spectrum = self.spectrum,
-                         chirality = self.chirality,
-                         chirality_degree = self.chirality_degree)
+        self._point_source.offaxis_angle = np.random.uniform(0,360)*u.deg
 
-        return ps.random_photon(detector = detector)
+        return self._point_source.random_photon(detector = detector)

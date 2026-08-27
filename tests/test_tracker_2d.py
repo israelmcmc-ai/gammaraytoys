@@ -1,10 +1,24 @@
 import astropy.units as u
 import numpy as np
 import pytest
+from scipy.stats import expon
 
 from gammaraytoys import ToyTracker2D
 from gammaraytoys.sims import Photon
 from gammaraytoys.coordinates import Cartesian2D
+from gammaraytoys.detectors.tracker import tracker_2d as tracker_module
+
+
+class _ExponRecorder:
+    """Stand-in for scipy's `expon` that counts how often the doppler-broadening
+    draw is reached, and otherwise behaves like the real thing."""
+
+    def __init__(self):
+        self.ncalls = 0
+
+    def rvs(self, *args, **kwargs):
+        self.ncalls += 1
+        return expon.rvs(*args, **kwargs)
 
 
 def test_overlapping_layers_raise():
@@ -90,3 +104,34 @@ def test_throwing_plane_is_tangent_and_perpendicular(tracker):
 
 def test_throwing_plane_size_is_diameter(tracker):
     assert tracker.throwing_plane_size == 2 * tracker.surrounding_circle_radius
+def test_doppler_broadening_flag_reaches_scattered_photons(tracker, monkeypatch):
+    # Regression test: simulate_event() recursed into the scattered photon
+    # without passing doppler_broadening down, so every photon past the first
+    # Compton got broadened even with doppler_broadening=False.
+    recorder = _ExponRecorder()
+    monkeypatch.setattr(tracker_module, 'expon', recorder)
+
+    for _ in range(200):
+        photon = Photon(position=Cartesian2D(0 * u.cm, 40 * u.mm),
+                        direction=270 * u.deg,
+                        energy=2 * u.MeV,
+                        chirality=1)
+        tracker.simulate_event(photon, doppler_broadening=False)
+
+    assert recorder.ncalls == 0
+
+
+def test_doppler_broadening_enabled_does_broaden(tracker, monkeypatch):
+    # Positive control for the test above: with the flag on, the broadening
+    # draw is actually reached, so a zero count there means something.
+    recorder = _ExponRecorder()
+    monkeypatch.setattr(tracker_module, 'expon', recorder)
+
+    for _ in range(200):
+        photon = Photon(position=Cartesian2D(0 * u.cm, 40 * u.mm),
+                        direction=270 * u.deg,
+                        energy=2 * u.MeV,
+                        chirality=1)
+        tracker.simulate_event(photon, doppler_broadening=True)
+
+    assert recorder.ncalls > 0

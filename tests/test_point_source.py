@@ -107,3 +107,56 @@ def test_isotropic_source_random_photon_directions_vary(tracker):
     # An isotropic source should not always throw photons in the same
     # direction
     assert len(set(np.round(directions, 3))) > 1
+def _radial_offset(detector, position, offaxis_angle):
+    """Distance from the surrounding-circle centre to `position`, projected onto
+    the direction the source sits in. Every photon a source throws must start on
+    the plane tangent to the surrounding circle, so this equals the radius."""
+
+    centre = detector.surrounding_circle_center
+
+    return ((position.x - centre.x) * np.sin(offaxis_angle) +
+            (position.y - centre.y) * np.cos(offaxis_angle))
+
+
+def test_injection_plane_follows_a_changed_offaxis_angle(tracker):
+    # Regression test: the throwing plane was cached on the detector alone, so
+    # moving the source on the sky kept injecting photons from the plane
+    # belonging to its original off-axis angle.
+    source = PointSource(offaxis_angle=0 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    source.random_injection_position(tracker)
+
+    source.offaxis_angle = 180 * u.deg
+
+    for _ in range(20):
+        position = source.random_injection_position(tracker)
+
+        assert _radial_offset(tracker, position, 180 * u.deg).to_value(u.cm) == pytest.approx(
+            tracker.surrounding_circle_radius.to_value(u.cm))
+
+
+def test_isotropic_photons_start_on_the_plane_matching_their_direction(tracker):
+    # IsotropicSource reuses one PointSource across photons; position and
+    # direction must stay consistent photon by photon.
+    source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    radius = tracker.surrounding_circle_radius.to_value(u.cm)
+
+    for _ in range(200):
+        photon = source.random_photon(tracker)
+
+        offaxis_angle = 270 * u.deg - photon.direction
+
+        assert _radial_offset(tracker, photon.position, offaxis_angle).to_value(u.cm) == pytest.approx(radius)
+
+
+def test_isotropic_directions_cover_the_full_circle(tracker):
+    source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    directions = u.Quantity([source.random_photon(tracker).direction for _ in range(2000)])
+
+    counts, _ = np.histogram(directions.to_value(u.deg), bins=8, range=(0, 360))
+
+    # 2000 draws over 8 equal bins: 250 +- 16 expected, so 5-sigma is ~+-80
+    assert np.all(np.abs(counts - 250) < 80)
