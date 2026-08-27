@@ -369,6 +369,20 @@ class ToyTracker2D:
                     photon.add_parent(compton)
 
                     # Continue simulation, iterative (mutates photon.interaction in place)
+                    #
+                    # Note that doppler_broadening is deliberately NOT passed down: the
+                    # scattered photon and everything after it always get broadened,
+                    # even when the caller asked for none. Only the first interaction
+                    # honours the flag.
+                    #
+                    # This is inconsistent, and it is left that way on purpose. The
+                    # broadening here is a fudge to illustrate the effect (see the
+                    # p_electron comment above), not a real Doppler model, so the
+                    # inconsistency costs nothing pedagogically. Making it consistent
+                    # would mean regenerating the cached instrument responses under
+                    # docs/tutorials/compton_telescopes/data/, and would first need
+                    # somebody to check that the fudge still gives sensible results
+                    # for the low-energy secondary photons it would newly apply to.
                     self.simulate_event(photon)
 
 
