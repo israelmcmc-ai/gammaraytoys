@@ -48,6 +48,23 @@ Branch naming: `claude/cosimita-prN-<topic>`, always cut from `main`.
 - Occultation is a per-photon rejection drawn from the *unocculted* mean.
 - Occultation must **not** be applied to `EarthAlbedoSource` (trap 1).
 
+## Queued for the PR 1 follow-up pass
+
+Decided by the maintainer; to be applied together with the PR 1 reviewer's findings
+in a single follow-up commit on `claude/cosimita-pr1-source-hierarchy`.
+
+- **`plot_spectrum()` must serve both source families.** Use the flux for a
+  `FarFieldSource` and the rate for a `NearFieldSource`, dispatching on the base
+  class rather than introducing a shared `normalization` property, and adjust the
+  y-axis units to match: `1/(erg cm s)` and `erg/(cm s)` for far field, `1/(erg s)`
+  and `erg/s` for near field. `diff_flux`, `integrate_flux` and
+  `discretize_spectrum` feed `plot_spectrum` and must stay consistent with it.
+  This requires `NearFieldSource` to expose a `rate` property, which PR 1 did not
+  add; PR 4's `NearPointSource` will implement it. Without this, `NearPointSource`
+  cannot plot its spectrum at all.
+- **Docstrings on `Simulator.run_events` and `run_binned`.** They are the main
+  public teaching surface. The trivial axis property accessors stay as they are.
+
 ## Open questions for the maintainer
 
 Carried forward until answered; they shape later PRs.
@@ -62,16 +79,6 @@ Carried forward until answered; they shape later PRs.
    plan's literal signature. Forced by the plan's own validation rule
    `orbit_radius > earth.radius`. Either the reader knows about the Earth, or that
    validation moves elsewhere.
-4. **`plot_spectrum()` will break for near-field sources** (blocks PR 4). `flux` lives
-   on the base `Source` and `NearFieldSource.flux` is hardcoded `None`, but
-   `plot_spectrum()` raises when `flux is None`. PR 4's `NearPointSource` therefore
-   cannot plot its spectrum. Needs a `normalization` property resolving to flux or
-   rate, with an adapting axis label. The plan (§5.1) intends these helpers to serve
-   all sources.
-5. **Blanket docstring constraint** (constraint 7). PR 1 left pre-existing untouched
-   `Simulator` methods undocumented. `run_events`/`run_binned` are the main public
-   teaching surface and arguably should be covered; the trivial axis accessors
-   arguably not.
 
 ## Known environment traps for agents
 
