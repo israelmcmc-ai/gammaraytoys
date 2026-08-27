@@ -9,25 +9,99 @@ import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
 
 class Source(ABC):
+    """
+    Abstract base class for every photon source.
+
+    Holds the pieces that are common to every source regardless of how it is
+    normalized or where it sits: the energy spectrum, the total normalization
+    used to scale it (`flux`), and the helpers that plot or discretize the
+    spectrum. Concrete geometry -- where the source is and how photons are
+    drawn from it -- lives in the two abstract subclasses below it:
+
+    - `FarFieldSource`: normalized by a flux, in `1/cm/s` (a source at
+      infinite distance, e.g. a point on the sky).
+    - `NearFieldSource`: normalized by a rate, in `1/s` (a source at a fixed
+      position near the detector).
+    """
 
     @property
     @abstractmethod
     def flux(self):
-        # Total
+        """
+        Total (spectrum-integrated) normalization of the source.
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            Flux in `1/cm/s` for a far-field source, or `None` if either the
+            source has no normalization set, or the source is a near-field
+            source (whose normalization is a rate, not a flux -- see
+            `NearFieldSource`).
+        """
         pass
 
     @property
     @abstractmethod
     def spectrum(self):
+        """
+        The source's energy spectrum.
+
+        Returns
+        -------
+        `Spectrum`
+            The (unit-normalized) shape of the source's energy distribution.
+        """
         pass
 
     def diff_flux(self, energy):
+        """
+        Differential flux at a given photon energy.
+
+        Parameters
+        ----------
+        energy : `astropy.units.Quantity`
+            Photon energy, in energy units (e.g. MeV).
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            `flux * spectrum.pdf(energy)`, i.e. the flux per unit energy at
+            `energy`.
+        """
         return self._flux * self.spectrum.pdf(energy)
 
     def integrate_flux(self, lo_energy, hi_energy):
+        """
+        Flux integrated over an energy interval.
+
+        Parameters
+        ----------
+        lo_energy, hi_energy : `astropy.units.Quantity`
+            Lower and upper bounds of the energy interval (energy units,
+            broadcastable against each other for multiple intervals).
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            `flux * spectrum.integrate(lo_energy, hi_energy)`.
+        """
         return self._flux * self.spectrum.integrate(lo_energy, hi_energy)
 
     def discretize_spectrum(self, axis):
+        """
+        Bin the source's flux onto an energy axis.
+
+        Parameters
+        ----------
+        axis : `histpy.Axis`
+            Energy bin edges to integrate the flux over.
+
+        Returns
+        -------
+        `histpy.Histogram`
+            One-dimensional histogram over `axis`, with each bin holding the
+            flux integrated across that bin's energy range.
+        """
 
         binned_spec = Histogram(axis,
                                 unit = self.flux.unit,
@@ -41,6 +115,31 @@ class Source(ABC):
                       energy_units = None, y_units = None,
                       discretize_axis = None,
                       **kwargs):
+        """
+        Plot the source's differential energy spectrum.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`, optional
+            Axes to plot on. A new figure is created if not given.
+        e2 : bool
+            If True, plot `E^2 dN/dE` instead of `dN/dE`.
+        energy_units : `astropy.units.Unit`, optional
+            Units for the energy axis. Defaults to MeV.
+        y_units : `astropy.units.Unit`, optional
+            Units for the flux axis. Defaults to `1/(erg cm s)` if `e2`,
+            otherwise `1/(erg cm s)` per unit energy.
+        discretize_axis : `histpy.Axis`, optional
+            If given, plot the spectrum binned onto this energy axis (via
+            `discretize_spectrum`) instead of a smooth curve.
+        **kwargs
+            Passed through to the underlying plot call.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the spectrum was plotted on.
+        """
 
         if self.flux is None:
             raise RuntimeError("Set a flux before plotting the spectrum")
@@ -98,17 +197,196 @@ class Source(ABC):
         return ax
 
     @abstractmethod
-    def random_photon(self, detector):
+    def random_photon(self, detector, pose = None):
+        """
+        Draw one random photon aimed at the detector.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at. Used to size and place the
+            throwing plane.
+        pose : `SpacecraftInterval` or None
+            Spacecraft pose to evaluate the source in. `None` (the default)
+            means pure detector-frame mode -- the source's `random_photon`
+            behaves exactly as it did before the inertial simulator existed.
+            A non-`None` pose is meaningful starting with the inertial
+            simulator (see `InertialSimulator`); it is accepted here so the
+            signature is uniform across sources, but has no effect yet.
+
+        Returns
+        -------
+        `Photon` or None
+            A photon in the detector frame, ready for
+            `detector.simulate_event()`, or `None` if the photon was
+            occulted (not possible yet -- occultation is introduced by the
+            inertial simulator).
+        """
         pass
 
-class PointSource(Source):
+    @abstractmethod
+    def simulated_rate(self, detector, pose = None):
+        """
+        Expected rate of photons launched at the detector.
+
+        This is the rate *before* occultation and before any time-dependent
+        scaling -- purely "how many photons per second does this source
+        throw at the detector's throwing plane". It is what `Simulator` (and,
+        later, `InertialSimulator`) uses to mix sources normalized by a flux
+        and sources normalized by a rate in the same run: everything is
+        summed as a rate.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photons are thrown at. Its
+            `throwing_plane_size` sets the overall scale.
+        pose : `SpacecraftInterval` or None
+            Spacecraft pose to evaluate the source in. `None` means pure
+            detector-frame mode. Meaningful starting with the inertial
+            simulator; has no effect yet.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            Rate in `1/s`, or `None` if the source has no normalization set.
+        """
+        pass
+
+class FarFieldSource(Source):
+    """
+    Abstract base class for sources at effectively infinite distance from
+    the detector -- point sources, the isotropic sky, and (later) extended
+    and Earth-albedo sources.
+
+    Normalized by a flux in `1/cm/s`: `IsotropicSource` and `PointSource`
+    already use `flux` to mean the flux **integrated over the whole sky**,
+    not a per-unit-angle brightness -- every far-field source must match
+    that convention, since it is what makes `simulated_rate()` a plain
+    product with the detector's `throwing_plane_size` (see `sky_integrated_flux`).
+    """
+
+    def sky_integrated_flux(self, pose = None):
+        """
+        Flux integrated over the whole sky, in `1/cm/s`.
+
+        The default implementation simply returns `flux` and ignores `pose`
+        -- true for every far-field source in this codebase except the
+        (future) Earth-albedo source, whose apparent flux depends on the
+        spacecraft's orbital radius. Subclasses that need pose-dependence
+        override this method; `flux` and `simulated_rate()` then follow
+        automatically.
+
+        Parameters
+        ----------
+        pose : `SpacecraftInterval` or None
+            Spacecraft pose. Ignored by this default implementation.
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            Flux in `1/cm/s`, or `None` if the source has no normalization
+            set.
+        """
+        return self.flux
+
+    def simulated_rate(self, detector, pose = None):
+        """
+        Expected rate of photons launched at the detector.
+
+        For every far-field source this is uniformly the sky-integrated
+        flux times the detector's throwing-plane size:
+        `sky_integrated_flux(pose) * detector.throwing_plane_size`.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photons are thrown at. `throwing_plane_size` is
+            `2a`, where `a` is the surrounding-circle radius.
+        pose : `SpacecraftInterval` or None
+            Spacecraft pose, forwarded to `sky_integrated_flux`. `None`
+            means pure detector-frame mode.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            Rate in `1/s`, or `None` if the source has no normalization set.
+        """
+        flux = self.sky_integrated_flux(pose)
+
+        if flux is None:
+            return None
+
+        return flux * detector.throwing_plane_size
+
+class NearFieldSource(Source):
+    """
+    Abstract base class for sources at a fixed position near the detector,
+    rather than at infinite distance on the sky (see `NearPointSource`,
+    added in a later PR).
+
+    Normalized by a total emission rate in `1/s` rather than a flux: "flux"
+    -- a brightness per unit length of sky -- is not a meaningful quantity
+    for a source close enough that its distance to the detector matters.
+    `flux` is therefore always `None` for a near-field source;
+    `Simulator.total_flux` uses that to report `None` whenever a near-field
+    source is mixed into a run, since a single flux no longer describes it.
+
+    Unlike `FarFieldSource`, there is no shared formula for `simulated_rate()`
+    across near-field geometries -- each source's acceptance depends on its
+    own position relative to the detector -- so it stays abstract here and is
+    implemented by each concrete subclass.
+    """
+
+    @property
+    def flux(self):
+        """
+        Always `None`.
+
+        A near-field source is normalized by a rate (`1/s`), not a flux
+        (`1/cm/s`) -- see the class docstring.
+        """
+        return None
+
+class PointSource(FarFieldSource):
+    """
+    A far-field source at a fixed off-axis angle in the detector frame.
+
+    Photons are thrown from a plane tangent to the detector's surrounding
+    circle, perpendicular to the direction to the source, and fly along that
+    direction.
+    """
 
     def __init__(self, offaxis_angle, spectrum,
                  flux = None, flux_pivot = None, pivot_energy = None,
                  chirality = None, chirality_degree = 1):
         """
-        chirality_degree [0,1]
-        flux needed for normalization
+        Parameters
+        ----------
+        offaxis_angle : `astropy.units.Quantity`
+            Off-axis angle Nu in the detector frame (angle units), CCW from
+            detector zenith (+y). See the module-level convention in
+            `ToyTracker2D`.
+        spectrum : `Spectrum`
+            The source's energy spectrum shape.
+        flux : `astropy.units.Quantity`, optional
+            Total flux integrated over the whole sky, in `1/cm/s`. Needed
+            for normalization (`simulated_rate`, `diff_flux`, ...); either
+            this or `flux_pivot`/`pivot_energy` may be given, or neither, in
+            which case `flux` is `None`.
+        flux_pivot : `astropy.units.Quantity`, optional
+            Differential flux at `pivot_energy` (`1/cm/s/energy`), used
+            together with `pivot_energy` to derive `flux` from the spectrum
+            shape when `flux` itself is not given directly.
+        pivot_energy : `astropy.units.Quantity`, optional
+            Energy at which `flux_pivot` is specified.
+        chirality : int or None
+            Dominant chirality (+1 or -1) of the photons this source emits,
+            or `None` for no chirality preference.
+        chirality_degree : float
+            Fraction, in `[0, 1]`, of photons drawn with the dominant
+            `chirality`; the remainder are drawn with the opposite one.
+            Ignored if `chirality` is `None`.
         """
 
         self._spectrum = spectrum
@@ -136,13 +414,30 @@ class PointSource(Source):
 
     @property
     def flux(self):
+        """Total flux integrated over the whole sky, in `1/cm/s`, or `None`."""
         return self._flux
 
     @property
     def spectrum(self):
+        """The source's energy spectrum."""
         return self._spectrum
 
     def random_injection_position(self, detector):
+        """
+        Draw a random photon starting position on the detector's throwing
+        plane at the current `offaxis_angle`.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector to throw at.
+
+        Returns
+        -------
+        `Cartesian2D`
+            A position uniformly distributed along the throwing plane, in
+            the detector frame.
+        """
 
         if detector is not self._detector or self.offaxis_angle != self._cached_offaxis_angle:
             self._detector = detector
@@ -153,7 +448,26 @@ class PointSource(Source):
         return  Cartesian2D(self._plane_origin.x + self._throw_parallel.x * perp_norm_dist,
                             self._plane_origin.y + self._throw_parallel.y * perp_norm_dist)
 
-    def random_photon(self, detector):
+    def random_photon(self, detector, pose = None):
+        """
+        Draw one random photon aimed at the detector from `offaxis_angle`.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at.
+        pose : `SpacecraftInterval` or None
+            Ignored. `PointSource` is aimed by a fixed detector-frame
+            `offaxis_angle`; pose-dependent aiming arrives with the inertial
+            simulator, which re-aims a `PointSource` by `sky_angle` instead.
+
+        Returns
+        -------
+        `Photon`
+            A photon starting on the throwing plane, flying along
+            `270 deg - offaxis_angle`, with an energy drawn from `spectrum`
+            and a chirality drawn per `chirality`/`chirality_degree`.
+        """
 
         chirality = copy(self.chirality)
         if chirality is not None:
@@ -166,9 +480,32 @@ class PointSource(Source):
                       energy = self.spectrum.random_energy(),
                       chirality = chirality)
 
-class IsotropicSource(Source):
+class IsotropicSource(FarFieldSource):
+    """
+    A far-field source uniform over the whole sky.
+
+    Internally re-aims a single reusable `PointSource` to a new random
+    off-axis angle for every photon, rather than building a fresh one per
+    draw.
+    """
 
     def __init__(self, spectrum, flux = None, chirality = None, chirality_degree = 0):
+        """
+        Parameters
+        ----------
+        spectrum : `Spectrum`
+            The source's energy spectrum shape.
+        flux : `astropy.units.Quantity`, optional
+            Total flux integrated over the whole sky, in `1/cm/s`. `None`
+            leaves the source unnormalized.
+        chirality : int or None
+            Dominant chirality (+1 or -1) of the photons this source emits,
+            or `None` for no chirality preference.
+        chirality_degree : float
+            Fraction, in `[0, 1]`, of photons drawn with the dominant
+            `chirality`; the remainder are drawn with the opposite one.
+            Ignored if `chirality` is `None`.
+        """
 
         self._spectrum = spectrum
         self.chirality = chirality
@@ -184,13 +521,32 @@ class IsotropicSource(Source):
 
     @property
     def flux(self):
+        """Total flux integrated over the whole sky, in `1/cm/s`, or `None`."""
         return self._flux
 
     @property
     def spectrum(self):
+        """The source's energy spectrum."""
         return self._spectrum
 
-    def random_photon(self, detector):
+    def random_photon(self, detector, pose = None):
+        """
+        Draw one random photon from a uniformly random direction.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at.
+        pose : `SpacecraftInterval` or None
+            Ignored. See `Source.random_photon`.
+
+        Returns
+        -------
+        `Photon`
+            A photon thrown from a uniformly random off-axis angle in
+            `[0, 360) deg`, with an energy drawn from `spectrum` and a
+            chirality drawn per `chirality`/`chirality_degree`.
+        """
 
         # Re-sync in case these were changed after construction
         self._point_source.chirality = self.chirality
