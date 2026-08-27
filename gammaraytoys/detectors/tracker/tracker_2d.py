@@ -3,7 +3,7 @@ import matplotlib as mpl
 import numpy as np
 from gammaraytoys import Material
 from astropy import units as u
-from .event import Photon, Compton, Absorption    
+from gammaraytoys.sims import Photon, Compton, Absorption
 from gammaraytoys.physics import ComptonPhysics2D
 from gammaraytoys.coordinates import Cartesian2D
 from scipy.stats import norm, expon

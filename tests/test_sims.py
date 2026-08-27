@@ -3,9 +3,9 @@ import numpy as np
 import pytest
 from histpy import Axis
 
-from gammaraytoys.detectors import (Simulator, PointSource,
-                                    MonoenergeticSpectrum,
-                                    SimpleTraditionalReconstructor)
+from gammaraytoys.sims import (Simulator, PointSource,
+                               MonoenergeticSpectrum,
+                               SimpleTraditionalReconstructor)
 
 
 @pytest.fixture

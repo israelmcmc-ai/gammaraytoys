@@ -2,10 +2,10 @@ import astropy.units as u
 import numpy as np
 
 from gammaraytoys.coordinates import Cartesian2D
-from gammaraytoys.detectors.reco import (Reconstructor,
-                                         SimpleTraditionalReconstructor,
-                                         RecoCompton)
-from gammaraytoys.detectors.event import Hits
+from gammaraytoys.sims.reco import (Reconstructor,
+                                    SimpleTraditionalReconstructor,
+                                    RecoCompton)
+from gammaraytoys.sims.event import Hits
 
 
 def test_simple_traditional_reconstructor_implements_interface():

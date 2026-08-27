@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from gammaraytoys import ToyTracker2D
-from gammaraytoys.detectors import Photon
+from gammaraytoys.sims import Photon
 from gammaraytoys.coordinates import Cartesian2D
 
 

@@ -4,7 +4,7 @@ import pytest
 from histpy import Histogram, Axis
 
 from gammaraytoys.analysis import SpectralResponse
-from gammaraytoys.detectors import PointSource, PowerLawSpectrum
+from gammaraytoys.sims import PointSource, PowerLawSpectrum
 
 
 @pytest.fixture
