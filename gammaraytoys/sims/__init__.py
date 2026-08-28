@@ -6,4 +6,4 @@ from .simulator import Simulator
 from .earth import Earth
 from .spacecraft_history import SpacecraftHistory, SpacecraftInterval
 from .observation_strategy import (ObservationStrategy, ZenithPointing, NadirPointing,
-                                   InertialPointing, SpinPointing)
+                                   InertialPointing, SpinPointing, TargetedPointing)
