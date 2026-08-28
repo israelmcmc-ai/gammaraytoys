@@ -45,6 +45,24 @@ class ZenithPointing(ObservationStrategy):
     """
 
     def __call__(self, time, orbit_radius, orbit_angle):
+        """
+        Parameters
+        ----------
+        time : Quantity
+            Time, seconds. Scalar or array. Unused by this strategy.
+        orbit_radius : Quantity
+            Spacecraft orbital radius `r`, length units. Scalar or array.
+            Unused by this strategy.
+        orbit_angle : Quantity
+            Spacecraft orbital position angle `theta`, CCW from inertial
+            +X, angle units. Scalar or array, same shape as `time`.
+
+        Returns
+        -------
+        Quantity
+            Attitude `A = theta`, angle units, same shape as `orbit_angle`.
+        """
+
         return orbit_angle
 
 
@@ -55,6 +73,25 @@ class NadirPointing(ObservationStrategy):
     """
 
     def __call__(self, time, orbit_radius, orbit_angle):
+        """
+        Parameters
+        ----------
+        time : Quantity
+            Time, seconds. Scalar or array. Unused by this strategy.
+        orbit_radius : Quantity
+            Spacecraft orbital radius `r`, length units. Scalar or array.
+            Unused by this strategy.
+        orbit_angle : Quantity
+            Spacecraft orbital position angle `theta`, CCW from inertial
+            +X, angle units. Scalar or array, same shape as `time`.
+
+        Returns
+        -------
+        Quantity
+            Attitude `A = theta + 180 deg`, angle units, same shape as
+            `orbit_angle`.
+        """
+
         return orbit_angle + 180 * u.deg
 
 
@@ -75,6 +112,24 @@ class InertialPointing(ObservationStrategy):
         self.attitude = attitude
 
     def __call__(self, time, orbit_radius, orbit_angle):
+        """
+        Parameters
+        ----------
+        time : Quantity
+            Time, seconds. Scalar or array. Unused by this strategy.
+        orbit_radius : Quantity
+            Spacecraft orbital radius `r`, length units. Scalar or array.
+            Unused by this strategy.
+        orbit_angle : Quantity
+            Spacecraft orbital position angle `theta`, CCW from inertial
+            +X, angle units. Scalar or array. Unused by this strategy.
+
+        Returns
+        -------
+        Quantity
+            The fixed attitude `A_0` passed to `__init__`, angle units.
+        """
+
         return self.attitude
 
 
@@ -103,4 +158,23 @@ class SpinPointing(ObservationStrategy):
         self.initial_attitude = initial_attitude
 
     def __call__(self, time, orbit_radius, orbit_angle):
+        """
+        Parameters
+        ----------
+        time : Quantity
+            Time, seconds. Scalar or array.
+        orbit_radius : Quantity
+            Spacecraft orbital radius `r`, length units. Scalar or array.
+            Unused by this strategy.
+        orbit_angle : Quantity
+            Spacecraft orbital position angle `theta`, CCW from inertial
+            +X, angle units. Scalar or array. Unused by this strategy.
+
+        Returns
+        -------
+        Quantity
+            Attitude `A = initial_attitude + rate * time`, angle units,
+            same shape as `time`.
+        """
+
         return self.initial_attitude + self.rate * time

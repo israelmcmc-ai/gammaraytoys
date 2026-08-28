@@ -101,7 +101,7 @@ def _solve_kepler_equation(mean_anomaly, eccentricity, tol = 1e-10, max_iter = 1
 
     raise RuntimeError(
         f"Kepler's equation failed to converge to tol={tol} rad after {max_iter} "
-        f"Newton iterations (worst residual {np.max(np.abs(delta)):.3e} rad); "
+        f"Newton iterations (worst step size {np.max(np.abs(delta)):.3e} rad); "
         f"eccentricity={eccentricity}")
 
 
@@ -116,6 +116,12 @@ class SpacecraftHistory:
     livetime (`uptime_s`) from row `i`. Row `N` is a pure terminator: it
     contributes only `t_N`, closing the last interval, and its pose and
     uptime are never read.
+
+    For a history built by `from_elliptical_orbit`, the underlying orbital
+    clock always has periapsis passage at the absolute time `t = 0 s`
+    (`t_periapsis = 0`), regardless of `initial_time`, which only shifts
+    where the *generated rows* start; this is the same zero point
+    `SpinPointing` measures its `initial_attitude` from.
     """
 
     def __init__(self, time, orbit_radius, orbit_angle, attitude, uptime, earth = None):
@@ -143,8 +149,11 @@ class SpacecraftHistory:
             `uptime[i]` is the livetime of interval `i = [time[i],
             time[i+1])`; `uptime[N]` is stored but never read.
         earth : Earth or None
-            Earth model used only to validate `orbit_radius > earth.radius`
-            for every interval. Defaults to `Earth()`.
+            Earth model used to validate `orbit_radius > earth.radius` for
+            every interval, and stored on the instance (see the `earth`
+            property) so that later consumers -- in particular `plot()` --
+            use the same Earth this history was validated against, rather
+            than risking a mismatched default. Defaults to `Earth()`.
 
         Raises
         ------
@@ -160,6 +169,8 @@ class SpacecraftHistory:
         if earth is None:
             earth = Earth()
 
+        self._earth = earth
+
         self._time_s = np.asarray(time.to_value(u.s), dtype = float)
         self._orbit_radius_km = np.asarray(orbit_radius.to_value(u.km), dtype = float)
         self._orbit_angle_deg = np.asarray(orbit_angle.to_value(u.deg), dtype = float)
@@ -167,6 +178,17 @@ class SpacecraftHistory:
         self._uptime_s = np.asarray(uptime.to_value(u.s), dtype = float)
 
         self._validate(earth)
+
+    @property
+    def earth(self):
+        """Earth: the Earth model this history was validated against
+        (Section 4.2's `orbit_radius > earth.radius` check). Read-only:
+        set it via the `earth` argument to `__init__`, `open()` or
+        `from_elliptical_orbit()` instead of reassigning it, so that a
+        history's pose data and the Earth it was checked against can never
+        drift apart. `plot()` defaults to this same instance."""
+
+        return self._earth
 
     def _validate(self, earth):
         """Run every check listed in Section 4.2; raise ValueError, with a
@@ -192,6 +214,24 @@ class SpacecraftHistory:
 
         # Interval quantities: row i = 0..N-1. The terminator (row N) is
         # exempt -- its uptime and orbit_radius are never read.
+
+        # NaN fails every comparison below (nan < 0, nan > dt, nan <= r_e
+        # are all False), so a NaN in an interval row would otherwise pass
+        # every check silently. Catch it explicitly, before it can reach a
+        # downstream photon direction as an untraceable NaN (PR 3).
+        interval_arrays = {
+            _RADIUS_COL: self._orbit_radius_km[:-1],
+            _ANGLE_COL: self._orbit_angle_deg[:-1],
+            _ATTITUDE_COL: self._attitude_deg[:-1],
+            _UPTIME_COL: self._uptime_s[:-1],
+        }
+        for col_name, values in interval_arrays.items():
+            bad_finite = np.nonzero(~np.isfinite(values))[0]
+            if len(bad_finite) > 0:
+                raise ValueError(
+                    f"{col_name} must be finite for every interval row; "
+                    f"non-finite value(s) at interval(s) {bad_finite.tolist()}.")
+
         livetime = self._uptime_s[:-1]
         bad_livetime = np.nonzero((livetime < 0) | (livetime > dt))[0]
         if len(bad_livetime) > 0:
@@ -239,11 +279,22 @@ class SpacecraftHistory:
         # slower but exact parser instead.
         df = pd.read_csv(filename, comment = '#', float_precision = 'round_trip')
 
-        return cls(time = df[_TIME_COL].to_numpy() * u.s,
-                  orbit_radius = df[_RADIUS_COL].to_numpy() * u.km,
-                  orbit_angle = df[_ANGLE_COL].to_numpy() * u.deg,
-                  attitude = df[_ATTITUDE_COL].to_numpy() * u.deg,
-                  uptime = df[_UPTIME_COL].to_numpy() * u.s,
+        expected_cols = {_TIME_COL, _RADIUS_COL, _ANGLE_COL, _ATTITUDE_COL, _UPTIME_COL}
+        missing_cols = expected_cols - set(df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"{filename}: missing column(s) {sorted(missing_cols)}; "
+                f"a .ori file needs all of {sorted(expected_cols)}.")
+
+        # dtype=float makes an empty (header-only) column reach `_validate`'s
+        # row-count check as a float array of length 0, instead of failing
+        # inside astropy's unit multiplication (an empty column reads back as
+        # dtype=object, which Quantity cannot handle).
+        return cls(time = df[_TIME_COL].to_numpy(dtype = float) * u.s,
+                  orbit_radius = df[_RADIUS_COL].to_numpy(dtype = float) * u.km,
+                  orbit_angle = df[_ANGLE_COL].to_numpy(dtype = float) * u.deg,
+                  attitude = df[_ATTITUDE_COL].to_numpy(dtype = float) * u.deg,
+                  uptime = df[_UPTIME_COL].to_numpy(dtype = float) * u.s,
                   earth = earth)
 
     def write(self, filename):
@@ -317,8 +368,11 @@ class SpacecraftHistory:
             every generated row. Defaults to `ZenithPointing()`.
         time_step : Quantity
             Requested spacing between rows, time units. Default 1 s. The
-            actual spacing is adjusted slightly so that a whole number of
-            equal intervals exactly tiles `duration`.
+            actual spacing is adjusted so that a whole number of equal
+            intervals exactly tiles `duration`; this adjustment can be
+            substantial when `time_step` does not divide `duration` evenly
+            (e.g. `time_step > duration` still yields at least 1 interval,
+            spanning the full `duration`).
         duration : Quantity or None
             Total time span covered by the generated history, time units.
             Defaults to one full orbital period, `2 pi sqrt(a^3 / mu)`.
@@ -393,10 +447,15 @@ class SpacecraftHistory:
 
         E = _solve_kepler_equation(mean_anomaly, e)
 
-        # True anomaly from E. atan2's principal range matches E/2 in
-        # [0, pi] only for E in [0, 2 pi), so unwrap by the number of full
-        # revolutions to keep nu (and hence orbit_angle) continuous even
-        # when `duration` spans more than one orbit.
+        # True anomaly from E. We use atan2 rather than
+        # `2 * atan(sqrt((1+e)/(1-e)) * tan(E_mod/2))` (the textbook form
+        # quoted in the docstring above) because tan diverges exactly at
+        # E_mod/2 = pi/2, i.e. E_mod = pi; atan2 stays well-defined there
+        # since it takes the sin and cos of E_mod/2 separately instead of
+        # their ratio. atan2's principal range matches E/2 in [0, pi] only
+        # for E in [0, 2 pi), so unwrap by the number of full revolutions to
+        # keep nu (and hence orbit_angle) continuous even when `duration`
+        # spans more than one orbit.
         revs = np.floor(E / (2 * np.pi))
         E_mod = E - revs * 2 * np.pi
         nu = (2 * np.arctan2(np.sqrt(1 + e) * np.sin(E_mod / 2), np.sqrt(1 - e) * np.cos(E_mod / 2))
@@ -475,8 +534,9 @@ class SpacecraftHistory:
             Axes to draw into. A new figure and axes are created if None.
         earth : Earth or None
             Earth model to draw for scale and context. Defaults to
-            `Earth()`; purely cosmetic, no validation is performed against
-            it.
+            `self.earth`, the same instance this history was validated
+            against; purely cosmetic here, no validation is performed
+            against it.
         nposes : int
             Number of representative spacecraft poses (markers + attitude
             arrows) to draw along the history, roughly evenly spaced by
@@ -492,14 +552,18 @@ class SpacecraftHistory:
             fig, ax = plt.subplots()
 
         if earth is None:
-            earth = Earth()
+            earth = self.earth
 
         length_unit = u.km
 
         earth.plot(ax = ax)
 
-        r = self._orbit_radius_km
-        theta = np.radians(self._orbit_angle_deg)
+        # Slice off the terminator row (index N): its pose is never read,
+        # per Section 4.2 and the class docstring, so it must not be plotted
+        # either -- a placeholder terminator pose (e.g. the `999999` sentinel
+        # a writer may emit) would otherwise blow out the axis limits.
+        r = self._orbit_radius_km[:-1]
+        theta = np.radians(self._orbit_angle_deg[:-1])
         x = r * np.cos(theta)
         y = r * np.sin(theta)
 
@@ -509,7 +573,7 @@ class SpacecraftHistory:
         idx = np.unique(np.linspace(0, self.nintervals - 1, n_marks).astype(int))
 
         arrow_len = 0.08 * np.max(r)
-        attitude = np.radians(self._attitude_deg)
+        attitude = np.radians(self._attitude_deg[:-1])
         for i in idx:
             ax.plot(x[i], y[i], 'o', color = 'tab:blue', ms = 4)
             ax.annotate('', xytext = (x[i], y[i]),
