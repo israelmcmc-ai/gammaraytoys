@@ -27,7 +27,7 @@ def test_pointsource_flux_none_without_normalization():
 
     source = PointSource(offaxis_angle=0 * u.deg, spectrum=spec)
 
-    assert source.flux is None
+    assert source.flux() is None
 
 
 def test_pointsource_integrate_flux_matches_spectrum_integral():
@@ -160,3 +160,97 @@ def test_isotropic_directions_cover_the_full_circle(tracker):
 
     # 2000 draws over 8 equal bins: 250 +- 16 expected, so 5-sigma is ~+-80
     assert np.all(np.abs(counts - 250) < 80)
+
+
+# --- PR 1: simulated_rate() and the pose = None seam ------------------------
+#
+# Plan section 5.2: for every far-field source,
+#     simulated_rate = flux(pose) * detector.throwing_plane_size
+# and flux() defaults to plain `self._flux`, unchanged by pose, for every
+# far-field source except the (later) Earth-albedo one. We compute the
+# expected rate here from the source's own flux and the detector's own
+# throwing_plane_size -- the same two ingredients the formula names -- never
+# by calling simulated_rate() itself and checking it against its own output.
+
+def test_pointsource_simulated_rate_equals_flux_times_throwing_plane_size(tracker):
+    flux = 3.7e-4 / u.cm / u.s
+    source = PointSource(offaxis_angle=45 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=flux)
+
+    expected_rate = flux * tracker.throwing_plane_size
+
+    assert source.simulated_rate(tracker).to_value(u.Hz) == pytest.approx(
+        expected_rate.to_value(u.Hz))
+
+
+def test_isotropic_source_simulated_rate_equals_flux_times_throwing_plane_size(tracker):
+    flux = 8.2e-3 / u.cm / u.s
+    source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV), flux=flux)
+
+    expected_rate = flux * tracker.throwing_plane_size
+
+    assert source.simulated_rate(tracker).to_value(u.Hz) == pytest.approx(
+        expected_rate.to_value(u.Hz))
+
+
+def test_pointsource_simulated_rate_is_none_without_flux(tracker):
+    source = PointSource(offaxis_angle=0 * u.deg, spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    assert source.simulated_rate(tracker) is None
+
+
+def test_isotropic_source_simulated_rate_is_none_without_flux(tracker):
+    source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    assert source.simulated_rate(tracker) is None
+
+
+def test_simulated_rate_pose_is_accepted_and_ignored(tracker):
+    # PR 1 wires `pose` through as a trailing keyword everywhere so PR 3's
+    # InertialSimulator can pass a real SpacecraftInterval later; for now it
+    # must be a pure no-op. There is no SpacecraftInterval yet to pass, so
+    # any object stands in for "something that isn't None".
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    point = PointSource(offaxis_angle=20 * u.deg, spectrum=spec, flux=2e-3 / u.cm / u.s)
+    iso = IsotropicSource(spectrum=spec, flux=2e-3 / u.cm / u.s)
+
+    for source in (point, iso):
+        rate_no_pose = source.simulated_rate(tracker)
+        rate_with_pose = source.simulated_rate(tracker, pose="not a real pose yet")
+
+        assert rate_with_pose == rate_no_pose
+
+
+def test_pointsource_random_photon_pose_is_accepted_and_ignored(tracker):
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = PointSource(offaxis_angle=30 * u.deg, spectrum=spec, flux=1 / u.cm / u.s)
+
+    # Re-seed identically around each draw so the only thing that can make
+    # the two photons differ is whether `pose` was actually used.
+    np.random.seed(12345)
+    photon_no_pose = source.random_photon(tracker)
+
+    np.random.seed(12345)
+    photon_with_pose = source.random_photon(tracker, pose="not a real pose yet")
+
+    assert photon_with_pose.direction == photon_no_pose.direction
+    assert photon_with_pose.energy == photon_no_pose.energy
+    assert photon_with_pose.position.x == photon_no_pose.position.x
+    assert photon_with_pose.position.y == photon_no_pose.position.y
+
+
+def test_isotropic_source_random_photon_pose_is_accepted_and_ignored(tracker):
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = IsotropicSource(spectrum=spec, flux=1 / u.cm / u.s)
+
+    np.random.seed(54321)
+    photon_no_pose = source.random_photon(tracker)
+
+    np.random.seed(54321)
+    photon_with_pose = source.random_photon(tracker, pose="not a real pose yet")
+
+    assert photon_with_pose.direction == photon_no_pose.direction
+    assert photon_with_pose.energy == photon_no_pose.energy
+    assert photon_with_pose.position.x == photon_no_pose.position.x
+    assert photon_with_pose.position.y == photon_no_pose.position.y

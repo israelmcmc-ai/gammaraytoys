@@ -34,16 +34,14 @@ def test_nsources_multiple_sources(tracker, source):
                     reconstructor=SimpleTraditionalReconstructor())
 
     assert sim.nsources == 2
-    assert sim.total_flux.to_value(source.flux.unit) == pytest.approx(
-        (source.flux + source2.flux).to_value(source.flux.unit))
 
 
-def test_standarize_termination_requires_exactly_one_condition(simulator):
+def test_standardize_termination_requires_exactly_one_condition(simulator):
     with pytest.raises(ValueError):
-        simulator._standarize_termination()
+        simulator._standardize_termination()
 
     with pytest.raises(ValueError):
-        simulator._standarize_termination(nsim=10, ntrig=5)
+        simulator._standardize_termination(nsim=10, ntrig=5)
 
 
 def test_run_events_by_nsim_count(simulator):
@@ -87,3 +85,237 @@ def test_measured_energy_axis_setter_preserves_scale(simulator):
 
     assert simulator.measured_energy_axis.label == 'Em'
     assert simulator.measured_energy_axis.nbins == 4
+
+
+# --- PR 1: rate-based nsim/duration must match the pre-refactor formula -----
+#
+# Plan section 5.2: Simulator used to compute
+#     nsim = round(total_flux * duration * throwing_plane_size)
+# and now computes nsim = round(total_simulated_rate * duration), with
+# total_simulated_rate = simulated_rate() summed over sources, which for a
+# far-field source is flux * throwing_plane_size. For a far-field-only run
+# the two must be numerically identical. We compute the "old formula" side
+# directly from the flux/duration inputs and detector.throwing_plane_size
+# (never by calling the Simulator and reading its own output back), then
+# compare it to what `_standardize_termination` -- the new rate-based path --
+# actually produces. `_standardize_termination` is O(1) regardless of how
+# large nsim comes out, so a huge nsim costs nothing to check.
+
+@pytest.mark.parametrize("flux_per_cm_s, duration_s", [
+    (1e-9, 0.137),    # tiny flux, sub-second duration -> nsim == 0
+    (1e-6, 100.0),    # small flux
+    (2.5e-4, 137.5),  # non-round values on both sides
+    (1e-3, 1000.0),   # a "typical" tutorial-scale flux
+    (1.0, 100.0),     # -> nsim in the thousands
+    (5.0, 1e7),       # top of the requested range on both axes -> huge nsim
+], ids=["tiny-flux-fractional-duration",
+        "small-flux",
+        "fractional-values",
+        "typical-flux",
+        "large-nsim",
+        "huge-flux-and-duration"])
+def test_nsim_from_duration_matches_old_flux_formula(tracker, flux_per_cm_s, duration_s):
+    flux = flux_per_cm_s / u.cm / u.s
+    duration = duration_s * u.s
+
+    source = PointSource(offaxis_angle=0 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=flux)
+    sim = Simulator(detector=tracker, sources=source,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    old_formula_nsim = round((flux * duration * tracker.throwing_plane_size).to_value(''))
+
+    nsim, _, _ = sim._standardize_termination(duration=duration)
+
+    assert nsim == old_formula_nsim
+
+
+def test_nsim_from_duration_matches_old_flux_formula_multi_source(tracker):
+    # Same check, but with the total-rate-summed-over-sources path that the
+    # multi-source branch of Simulator.__init__ takes, against the old
+    # formula's flux summed over sources.
+    flux1 = 3e-4 / u.cm / u.s
+    flux2 = 7e-4 / u.cm / u.s
+    duration = 500 * u.s
+
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    s1 = PointSource(offaxis_angle=0 * u.deg, spectrum=spec, flux=flux1)
+    s2 = PointSource(offaxis_angle=90 * u.deg, spectrum=spec, flux=flux2)
+
+    sim = Simulator(detector=tracker, sources=[s1, s2],
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    old_formula_nsim = round(((flux1 + flux2) * duration * tracker.throwing_plane_size).to_value(''))
+
+    nsim, _, _ = sim._standardize_termination(duration=duration)
+
+    assert nsim == old_formula_nsim
+
+
+@pytest.mark.parametrize("flux_per_cm_s, nsim", [
+    (1e-9, 1),
+    (1e-6, 50),
+    (1e-3, 2000),        # -> nsim well above 1000
+    (5.0, 5_000_000),    # top of the requested flux range, huge nsim
+], ids=["tiny-flux", "small-flux", "large-nsim", "huge-flux-and-nsim"])
+def test_duration_from_nsim_matches_old_flux_formula(tracker, flux_per_cm_s, nsim):
+    # Inverse direction: given nsim, Simulator._standardize_termination must
+    # recover duration = nsim / (flux * throwing_plane_size), i.e. the exact
+    # algebraic inverse of the formula checked above.
+    flux = flux_per_cm_s / u.cm / u.s
+
+    source = PointSource(offaxis_angle=0 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=flux)
+    sim = Simulator(detector=tracker, sources=source,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    expected_duration = (nsim / (flux * tracker.throwing_plane_size)).to(u.s)
+
+    _, _, duration = sim._standardize_termination(nsim=nsim)
+
+    assert duration.to_value(u.s) == pytest.approx(expected_duration.to_value(u.s), rel=1e-12)
+
+
+# --- PR 1: multi-source selection weights match the rate ratios ------------
+
+def test_multi_source_selection_weights_match_rate_ratios(tracker):
+    # Three point sources with flux ratio 1:3:6. simulated_rate() = flux *
+    # throwing_plane_size for every one of them, and throwing_plane_size is
+    # the same detector property for all three, so it cancels: the expected
+    # selection-probability ratio is exactly the flux ratio, 0.1:0.3:0.6.
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    fluxes = u.Quantity([1.0, 3.0, 6.0]) / u.cm / u.s
+    sources = [PointSource(offaxis_angle=i * 10 * u.deg, spectrum=spec, flux=f)
+              for i, f in enumerate(fluxes)]
+
+    sim = Simulator(detector=tracker, sources=sources,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    expected_p = (fluxes / np.sum(fluxes)).to_value('')
+
+    # The weight array Simulator actually built for source selection must
+    # equal the flux ratios exactly -- this part is deterministic arithmetic,
+    # not a statistical claim.
+    np.testing.assert_allclose(sim._relative_rate, expected_p)
+
+    # Statistical check of the draw itself. This replicates the exact
+    # selection call run_events() makes per photon --
+    # `np.random.choice(range(nsources), p=self._relative_rate)` -- without
+    # the expensive part that follows it (random_photon + the full detector
+    # walk), since which source gets picked does not depend on what happens
+    # to the photon afterwards.
+    n_draws = 200_000
+    draws = np.random.choice(sim.nsources, size=n_draws, p=sim._relative_rate)
+    empirical = np.array([np.sum(draws == i) for i in range(sim.nsources)]) / n_draws
+
+    # Binomial standard error per source: sigma = sqrt(p(1-p)/N). We assert
+    # at 5 sigma -- one full sigma of headroom beyond the 4 sigma floor --
+    # so a false failure would occur with probability ~6e-7 per source even
+    # if this weren't already deterministic under the seeded RNG.
+    sigma = np.sqrt(expected_p * (1 - expected_p) / n_draws)
+    assert np.all(np.abs(empirical - expected_p) <= 5 * sigma), (
+        f"empirical={empirical}, expected={expected_p}, 5-sigma={5 * sigma}")
+
+
+# --- PR 1: total_simulated_rate is None when a source has no flux ---------
+
+def test_total_simulated_rate_none_when_source_has_no_flux(tracker):
+    # PointSource with neither `flux` nor `flux_pivot`/`pivot_energy` given
+    # is unnormalized: flux() is None, so is simulated_rate(), and so must
+    # be total_simulated_rate.
+    source = PointSource(offaxis_angle=0 * u.deg, spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    sim = Simulator(detector=tracker, sources=source,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    assert sim.total_simulated_rate is None
+
+
+# --- PR 1: run_events() must actually consult the rate weights -------------
+#
+# test_multi_source_selection_weights_match_rate_ratios above only checks that
+# `sim._relative_rate` is built correctly, and separately replays
+# `np.random.choice(..., p=sim._relative_rate)` directly against numpy --
+# neither actually calls `run_events`. An unweighted
+# `np.random.choice(range(nsources))` inside `run_events` (weights deleted
+# entirely) passes both of those and every other test in the suite. This
+# test drives sources through `run_events` itself and classifies the
+# resulting photons by their (distinct, monoenergetic) energy, so it can only
+# pass if `run_events` actually used the per-source weights to pick sources.
+
+def test_run_events_selects_sources_in_proportion_to_rate(tracker):
+    # flux ratio 1:3:6 -> expected selection probability 0.1:0.3:0.6.
+    # Under the mutant (uniform choice over 3 sources) every source would
+    # land at 1/3 = 0.333 instead -- about 19 sigma from 0.1 at nsim=600,
+    # while the correct weighted draw sits within a few sigma of 0.1/0.3/0.6.
+    fluxes = u.Quantity([1.0, 3.0, 6.0]) / u.cm / u.s
+    energies = [1.0, 2.0, 3.0] * u.MeV
+    sources = [PointSource(offaxis_angle=0 * u.deg, spectrum=MonoenergeticSpectrum(e), flux=f)
+              for e, f in zip(energies, fluxes)]
+
+    sim = Simulator(detector=tracker, sources=sources,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    # Cheap, exact, deterministic check that the weight array itself is
+    # right (same as test_multi_source_selection_weights_match_rate_ratios) --
+    # kept here too since it is what makes the statistical check below mean
+    # anything.
+    expected_p = (fluxes / np.sum(fluxes)).to_value('')
+    np.testing.assert_allclose(sim._relative_rate, expected_p)
+
+    nsim = 600
+    drawn = u.Quantity([ev.energy for ev, _ in sim.run_events(nsim=nsim)])
+    counts = np.array([np.sum(drawn == e) for e in energies])
+    assert np.sum(counts) == nsim
+
+    # Binomial standard error per source: sigma = sqrt(p(1-p)/N).
+    sigma = np.sqrt(expected_p * (1 - expected_p) / nsim)
+    assert np.all(np.abs(counts / nsim - expected_p) <= 5 * sigma), (
+        f"empirical={counts / nsim}, expected={expected_p}, 5-sigma={5 * sigma}")
+
+
+# --- PR 1: `duration` termination and `sim.duration` accumulation ----------
+#
+# No existing test calls `run_events(duration=...)` at all -- the duration
+# path is only reached indirectly, through the private
+# `_standardize_termination`. `sim.duration` is printed in tutorials 02 and
+# 03, so it is user-visible output with zero end-to-end coverage. This test
+# runs a real `duration`-terminated simulation on one normalized far-field
+# source and checks both the resulting `nsim` (independently, from the old
+# flux formula) and the accumulated `sim.duration`.
+
+def test_run_events_by_duration_sets_nsim_and_duration(tracker):
+    flux = 1e-3 / u.cm / u.s
+    duration = 12285 * u.s  # -> nsim ~ 200 for this tracker's throwing_plane_size
+
+    source = PointSource(offaxis_angle=0 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=flux)
+    sim = Simulator(detector=tracker, sources=source,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    expected_nsim = round((flux * duration * tracker.throwing_plane_size).to_value(''))
+    assert 100 <= expected_nsim <= 400  # sanity: keeps the run fast
+
+    events = list(sim.run_events(duration=duration))
+
+    assert len(events) == expected_nsim
+    assert sim.nsim == expected_nsim
+
+    # sim.duration is derived from the launched-photon count and the total
+    # simulated rate (nsim / total_simulated_rate), not measured -- so it
+    # will not equal the requested `duration` exactly (nsim was rounded to
+    # an integer), but it must be very close: the rounding error is at most
+    # 0.5 photon out of ~200, i.e. well under 1%. Halving the accumulator
+    # (the proven mutant) is off by 50%, far outside this tolerance.
+    assert sim.duration.to_value(u.s) == pytest.approx(duration.to_value(u.s), rel=1e-2)
+
+    # Exact, independent recomputation of the accumulation formula itself
+    # (nsim / total_simulated_rate), using only sim.nsim and quantities
+    # computed outside the simulator -- pins the mutant down precisely
+    # rather than relying on the rounding-tolerant check above.
+    total_simulated_rate = flux * tracker.throwing_plane_size
+    expected_duration = (sim.nsim / total_simulated_rate).to(u.s)
+    assert sim.duration.to_value(u.s) == pytest.approx(expected_duration.to_value(u.s), rel=1e-9)

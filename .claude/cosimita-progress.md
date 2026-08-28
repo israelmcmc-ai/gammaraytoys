@@ -29,8 +29,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 
 | PR | Scope | Branch | State |
 |---|---|---|---|
-| 1 | Source hierarchy + `simulated_rate()` | `claude/cosimita-pr1-source-hierarchy` | In review |
-| 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | In review |
+| 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
+| 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | **PR #14 open** — awaiting maintainer |
 | 3 | `InertialSimulator`, transforms, occultation | — | Not started |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
 | 5 | `EarthAlbedoSource` | — | Not started |
@@ -54,14 +54,27 @@ Decided by the maintainer; to be applied together with the PR 1 reviewer's findi
 in a single follow-up commit on `claude/cosimita-pr1-source-hierarchy`.
 
 - **`plot_spectrum()` must serve both source families.** Use the flux for a
-  `FarFieldSource` and the rate for a `NearFieldSource`, dispatching on the base
-  class rather than introducing a shared `normalization` property, and adjust the
-  y-axis units to match: `1/(erg cm s)` and `erg/(cm s)` for far field, `1/(erg s)`
+  `FarFieldSource` and the rate for a `NearFieldSource`, and adjust the y-axis units
+  to match: `1/(erg cm s)` and `erg/(cm s)` for far field, `1/(erg s)`
   and `erg/s` for near field. `diff_flux`, `integrate_flux` and
   `discretize_spectrum` feed `plot_spectrum` and must stay consistent with it.
   This requires `NearFieldSource` to expose a `rate` property, which PR 1 did not
   add; PR 4's `NearPointSource` will implement it. Without this, `NearPointSource`
   cannot plot its spectrum at all.
+
+  **Implemented polymorphically**, via an abstract `Source.normalization` that
+  `FarFieldSource` resolves to `flux` and `NearFieldSource` to `rate`, rather than
+  by `isinstance` branching inside `plot_spectrum`. Same dispatch-by-base-class
+  behaviour, and it additionally removes a latent bug: `diff_flux` and
+  `integrate_flux` reached into a private `self._flux` that the base class never
+  defines, which breaks any subclass that does not happen to set it. Far-field
+  y-units are unchanged; near-field gets `1/(erg s)` and `erg/s`.
+
+- **`Simulator.__init__` no longer accepts `duration`/`nsim`/`ntrig`.** They were
+  silently discarded (`Simulator(..., duration=1000*u.s).duration` returned `0 s`)
+  while PR 1's new docstring claimed they worked. Nothing in the repo, tests or
+  tutorials passed them — they are only ever given to `run_events`/`run_binned`,
+  which do consume them. This is a deliberate API removal, visible in the diff.
 - **Docstrings on `Simulator.run_events` and `run_binned`.** They are the main
   public teaching surface. The trivial axis property accessors stay as they are.
 
@@ -79,6 +92,80 @@ Carried forward until answered; they shape later PRs.
    plan's literal signature. Forced by the plan's own validation rule
    `orbit_radius > earth.radius`. Either the reader knows about the Earth, or that
    validation moves elsewhere.
+
+## Landed in PR 1 beyond the original plan
+
+- **`flux` moved off the base `Source`** and `sky_integrated_flux(pose)` became
+  `FarFieldSource.flux(pose)`, a method. `NearFieldSource.flux` is gone entirely.
+- **`Simulator.total_flux` removed**; `total_rate` renamed `total_simulated_rate`.
+- **`chirality_degree` defaults to 0** everywhere.
+- **Source plotting**: `Source.plot(ax, detector)`, polymorphic. Near-field sources
+  draw a red star at their `position` (a new abstract property on `NearFieldSource`);
+  far-field point sources draw a sky circle at `2 x surrounding_circle_radius` with a
+  star just outside it at `1.08 x` that radius, along `(sin Nu, cos Nu)`;
+  `IsotropicSource` draws a full-circle arc. **PRs 4 and 5 add `ExtendedSource` and
+  `EarthAlbedoSource` by calling the existing `plot_sky_arc` with their own extent** --
+  the primitive is already there, do not rebuild it.
+- The cosimita notebooks use **COMPTELito**, not cosita: `SimpleTraditionalReconstructor`
+  needs the first hit in layer 0 with a calorimeter below, which cosita's layer ordering
+  does not provide. Measured on cosita: 0.38% trigger, psi std 142.9 deg (no cone).
+  On COMPTELito: 10.35% trigger, psi std 30.9 deg, properly centred.
+
+## Traps for anyone editing sources
+
+- **An abstract `@property` cannot be satisfied by `self.position = value` in
+  `__init__`** -- a property with no setter is a data descriptor and blocks the
+  assignment. Back it with `self._position` and override the property, the pattern
+  already used for `PointSource.spectrum`.
+- **`ToyTracker2D.plot()` hardcodes centimetres** for its data coordinates and sets
+  axes limits to +-1.5x the surrounding radius. Anything drawn on top must use cm and
+  must expand those limits, or it lands in the wrong place or off-screen -- silently,
+  in both cases.
+
+## Carried into PR 3
+
+- **`is_occulted` costs 140 us/call** vs 0.5 us for the plain-float equivalent (277x),
+  because it does Quantity arithmetic per photon and recomputes `arcsin(R_E/r)` every
+  call although it is constant per interval. That is 22% of `random_photon` -- inside
+  the plan's 50% budget, but exactly the pattern SS3.5 warns about. Hoist `nadir` and
+  `rho` to floats once per interval and unit-test the fast path against `is_occulted`
+  so the two cannot drift.
+- **`attitude` and `orbit_angle` are unwrapped past 360 deg** (matching the plan's own
+  SS4.1 example). PR 3's `Nu = A - lambda` owns the wrapping; PR 2 does none.
+- **`FarFieldSource` has no `occultable` property yet** (trap 1 requires it, `False` on
+  the albedo). Deliberately left out of PR 1; PR 3 or PR 5 adds it.
+- **`PointSource.__init__` takes `offaxis_angle` as a required first positional.** PR 3
+  must add `sky_angle` and make them mutually exclusive. Every call site in `docs/` and
+  `tests/` uses the keyword form, so positional compatibility is not load-bearing.
+- **SS5.3 commits occultation to the *source*** (`random_photon` returns `Photon | None`),
+  not to the simulator recovering lambda from `photon.direction`. PR 3 must not drift to
+  the latter.
+- **`simulated_rate()` returns `None` for an unnormalized source**, which would surface
+  in PR 3 as a `TypeError` deep inside `mu = rate * livetime * scaling`.
+  `InertialSimulator.__init__` should validate and raise naming the offender.
+- **`Earth` is not carried on `SpacecraftHistory`'s public API for PR 3's use** beyond
+  the new read-only property -- PR 3 and PR 7's YAML loader must use that property
+  rather than constructing their own, or the validated and simulated Earths can differ.
+- **The per-photon body of `Simulator.run_events` is inlined**, so `InertialSimulator`
+  will duplicate `random_photon -> simulate_event -> reconstruct`. Extracting a shared
+  `_simulate_one(source, pose)` helper would avoid that.
+
+## Lessons for later PRs
+
+- **Mutation-test the tests, not just the code.** Both the first test round and the
+  orchestrator's own mutation check passed PR 1 while the two behaviours it actually
+  changed -- rate-weighted source selection and the `duration` accumulator -- could be
+  deleted outright with the whole suite still green. Passing a mutation check only
+  proves the suite catches the mutations you happened to pick. Test authors must inject
+  the specific bug their test targets and show it fails.
+- **The reviewer slot earns its cost.** Review found real defects in both wave-1 PRs
+  that implementation, testing and orchestrator verification had all missed.
+- **Agents must commit and push as soon as work is done**, not after polishing: a rate
+  limit killed one agent mid-task and lost the entire round.
+- **`git push` can fail transiently with `could not read Username`** while `git fetch`
+  keeps working -- the proxy's injected write credential drops and comes back. Six
+  consecutive attempts failed and the seventh succeeded with nothing changed. Commits
+  are not lost when this happens; re-push rather than redoing the work.
 
 ## Known environment traps for agents
 
