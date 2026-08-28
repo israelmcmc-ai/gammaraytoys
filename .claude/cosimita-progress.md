@@ -29,7 +29,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 
 | PR | Scope | Branch | State |
 |---|---|---|---|
-| 1 | Source hierarchy + `simulated_rate()` | `claude/cosimita-pr1-source-hierarchy` | **PR #13 open** — awaiting maintainer |
+| 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | **PR #14 open** — awaiting maintainer |
 | 3 | `InertialSimulator`, transforms, occultation | — | Not started |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
@@ -92,6 +92,35 @@ Carried forward until answered; they shape later PRs.
    plan's literal signature. Forced by the plan's own validation rule
    `orbit_radius > earth.radius`. Either the reader knows about the Earth, or that
    validation moves elsewhere.
+
+## Landed in PR 1 beyond the original plan
+
+- **`flux` moved off the base `Source`** and `sky_integrated_flux(pose)` became
+  `FarFieldSource.flux(pose)`, a method. `NearFieldSource.flux` is gone entirely.
+- **`Simulator.total_flux` removed**; `total_rate` renamed `total_simulated_rate`.
+- **`chirality_degree` defaults to 0** everywhere.
+- **Source plotting**: `Source.plot(ax, detector)`, polymorphic. Near-field sources
+  draw a red star at their `position` (a new abstract property on `NearFieldSource`);
+  far-field point sources draw a sky circle at `2 x surrounding_circle_radius` with a
+  star just outside it at `1.08 x` that radius, along `(sin Nu, cos Nu)`;
+  `IsotropicSource` draws a full-circle arc. **PRs 4 and 5 add `ExtendedSource` and
+  `EarthAlbedoSource` by calling the existing `plot_sky_arc` with their own extent** --
+  the primitive is already there, do not rebuild it.
+- The cosimita notebooks use **COMPTELito**, not cosita: `SimpleTraditionalReconstructor`
+  needs the first hit in layer 0 with a calorimeter below, which cosita's layer ordering
+  does not provide. Measured on cosita: 0.38% trigger, psi std 142.9 deg (no cone).
+  On COMPTELito: 10.35% trigger, psi std 30.9 deg, properly centred.
+
+## Traps for anyone editing sources
+
+- **An abstract `@property` cannot be satisfied by `self.position = value` in
+  `__init__`** -- a property with no setter is a data descriptor and blocks the
+  assignment. Back it with `self._position` and override the property, the pattern
+  already used for `PointSource.spectrum`.
+- **`ToyTracker2D.plot()` hardcodes centimetres** for its data coordinates and sets
+  axes limits to +-1.5x the surrounding radius. Anything drawn on top must use cm and
+  must expand those limits, or it lands in the wrong place or off-screen -- silently,
+  in both cases.
 
 ## Carried into PR 3
 
