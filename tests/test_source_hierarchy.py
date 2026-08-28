@@ -81,9 +81,10 @@ class _MinimalNearFieldSource(NearFieldSource):
     the entire justification for `simulated_rate()` per plan 5.2.
     """
 
-    def __init__(self, spectrum, rate=None):
+    def __init__(self, spectrum, rate=None, position=None):
         self._spectrum = spectrum
         self._rate = rate
+        self._position = position
         self._point_source = PointSource(offaxis_angle=0 * u.deg, spectrum=spectrum)
 
     @property
@@ -99,6 +100,13 @@ class _MinimalNearFieldSource(NearFieldSource):
     @property
     def rate(self):
         return self._rate
+
+    @property
+    def position(self):
+        # PR 1 adds `NearFieldSource.position` as an abstract property (used
+        # by `NearFieldSource.plot`); not exercised by this hierarchy stub's
+        # own tests, so a fixed default is enough to keep it instantiable.
+        return self._position
 
 
 # --- PR 1: mixing a far-field and a near-field source in one Simulator -----

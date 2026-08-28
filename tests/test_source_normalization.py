@@ -74,6 +74,13 @@ class _NearFieldRateStub(NearFieldSource):
     def simulated_rate(self, detector, pose=None):
         raise NotImplementedError
 
+    @property
+    def position(self):
+        # PR 1 adds `NearFieldSource.position` as an abstract property (used
+        # by `NearFieldSource.plot`); not exercised by this normalization
+        # stub's own tests, so it's simply unset.
+        raise NotImplementedError
+
 
 def _plotted_curve(source, e2):
     """

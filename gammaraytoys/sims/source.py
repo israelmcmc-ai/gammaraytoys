@@ -8,6 +8,55 @@ from copy import copy
 import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
 
+# `ToyTracker2D.plot()` hardcodes its data coordinates to this unit -- every
+# source marker drawn on top of it must match, or it lands in the right
+# place numerically but the wrong place on the figure.
+_PLOT_LENGTH_UNIT = u.cm
+
+# How far outside the sky circle (itself `2 x` the surrounding-circle
+# radius, see `FarFieldSource.plot_sky_circle`) a source's marker/arc sits,
+# as a multiple of the sky circle's radius. Shared by every far-field
+# `plot_sky_*` helper so a star and an arc drawn for different sources line
+# up on the same ring.
+_SKY_MARKER_RADIUS_FACTOR = 1.08
+
+
+def _expand_axes_limits(ax, center, radius, length_unit = _PLOT_LENGTH_UNIT):
+    """
+    Grow `ax`'s x/y limits, if necessary, to contain a square bounding box
+    of half-width `radius` centered on `center`.
+
+    `ToyTracker2D.plot()` sizes its axes to `1.5 x` its own surrounding
+    circle -- far smaller than the sky circle a far-field source draws at
+    `2 x` that radius -- so plotting a source on top of it would otherwise
+    leave the sky circle and its marker entirely outside the visible axes.
+    Limits are only ever widened here, never narrowed, so plotting several
+    sources in sequence on the same axes keeps every earlier one visible.
+
+    Parameters
+    ----------
+    ax : `matplotlib.axes.Axes`
+        Axes to expand.
+    center : `Cartesian2D`
+        Centre of the bounding box, in the detector frame.
+    radius : `astropy.units.Quantity`
+        Half-width of the bounding box (length units).
+    length_unit : `astropy.units.Unit`
+        Unit `ax`'s data coordinates are already in. Defaults to
+        `_PLOT_LENGTH_UNIT` (cm), matching `ToyTracker2D.plot()`.
+    """
+
+    x_center = center.x.to_value(length_unit)
+    y_center = center.y.to_value(length_unit)
+    r = radius.to_value(length_unit)
+
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+
+    ax.set_xlim(min(xlim[0], x_center - r), max(xlim[1], x_center + r))
+    ax.set_ylim(min(ylim[0], y_center - r), max(ylim[1], y_center + r))
+
+
 class Source(ABC):
     """
     Abstract base class for every photon source.
@@ -349,6 +398,185 @@ class FarFieldSource(Source):
 
         return flux * detector.throwing_plane_size
 
+    def _sky_radius(self, detector):
+        """
+        Radius of the "sky", drawn by `plot_sky_circle` as twice the
+        detector's own surrounding circle.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector to size the sky circle against.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            `2 * detector.surrounding_circle_radius`, in length units.
+        """
+        return 2 * detector.surrounding_circle_radius
+
+    def plot_sky_circle(self, ax, detector, length_unit = _PLOT_LENGTH_UNIT, **kwargs):
+        """
+        Draw the sky as a faint dotted circle around the detector.
+
+        The sky circle has radius `2 x` the detector's surrounding-circle
+        radius, centered on `detector.surrounding_circle_center`, styled
+        like the existing surrounding-circle drawn by
+        `ToyTracker2D.plot(draw_surrounding_circle = True)`. Expands `ax`'s
+        limits (only ever growing them, see `_expand_axes_limits`) so the
+        circle -- entirely outside the plain `detector.plot()` limits -- is
+        actually visible.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source's sky circle is drawn against.
+        length_unit : `astropy.units.Unit`
+            Unit for the plotted data coordinates. Defaults to cm, matching
+            `ToyTracker2D.plot()`; only change this if `ax` was set up with
+            a different unit.
+        **kwargs
+            Passed through to `ax.plot`, overriding the default faint
+            dotted style.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the sky circle was plotted on.
+        """
+
+        center = detector.surrounding_circle_center
+        radius = self._sky_radius(detector)
+
+        theta = np.linspace(0, 360, 200) * u.deg
+        x = (center.x + radius * np.cos(theta)).to_value(length_unit)
+        y = (center.y + radius * np.sin(theta)).to_value(length_unit)
+
+        style = dict(ls = ':', color = 'black', alpha = .3)
+        style.update(kwargs)
+        ax.plot(x, y, **style)
+
+        _expand_axes_limits(ax, center, _SKY_MARKER_RADIUS_FACTOR * radius, length_unit)
+
+        return ax
+
+    def plot_sky_marker(self, ax, detector, offaxis_angle,
+                        length_unit = _PLOT_LENGTH_UNIT,
+                        marker_radius_factor = _SKY_MARKER_RADIUS_FACTOR,
+                        **kwargs):
+        """
+        Draw a single red star just outside the sky circle, marking a point
+        source's direction.
+
+        The star sits along the unit vector `(sin Nu, cos Nu)` from
+        `detector.surrounding_circle_center` (plan section 3.3: `Nu = 0` is
+        the detector's `+y`, `Nu = 90 deg` is `+x`), at `marker_radius_factor
+        x` the sky circle's radius -- just outside it. Used by
+        `PointSource.plot`; the same convention underlies `plot_sky_arc`
+        below.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector and, typically, its sky
+            circle (`plot_sky_circle`).
+        detector : `ToyTracker2D`
+            The detector this source is plotted against.
+        offaxis_angle : `astropy.units.Quantity`
+            Off-axis angle Nu (angle units) the star is placed at.
+        length_unit : `astropy.units.Unit`
+            Unit for the plotted data coordinates. Defaults to cm.
+        marker_radius_factor : float
+            How far outside the sky circle's radius to place the star, as a
+            multiple of that radius. Defaults to `_SKY_MARKER_RADIUS_FACTOR`
+            (1.08).
+        **kwargs
+            Passed through to `ax.plot`, overriding the default red-star
+            style.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the star was plotted on.
+        """
+
+        center = detector.surrounding_circle_center
+        marker_radius = marker_radius_factor * self._sky_radius(detector)
+
+        x = (center.x + marker_radius * np.sin(offaxis_angle)).to_value(length_unit)
+        y = (center.y + marker_radius * np.cos(offaxis_angle)).to_value(length_unit)
+
+        style = dict(marker = '*', color = 'red', markersize = 15, linestyle = 'none')
+        style.update(kwargs)
+        ax.plot(x, y, **style)
+
+        _expand_axes_limits(ax, center, marker_radius, length_unit)
+
+        return ax
+
+    def plot_sky_arc(self, ax, detector, center_angle, extent,
+                     length_unit = _PLOT_LENGTH_UNIT,
+                     marker_radius_factor = _SKY_MARKER_RADIUS_FACTOR,
+                     **kwargs):
+        """
+        Draw an arc just outside the sky circle, spanning `extent` centered
+        on `center_angle`.
+
+        This is the shared primitive behind `IsotropicSource.plot` (called
+        with `extent = 360 deg`, tracing a full circle) and, in later PRs,
+        `ExtendedSource` and `EarthAlbedoSource`, which will call it with
+        their own characteristic angular extent (a von Mises width, or the
+        Earth's angular radius `rho`) instead of the whole sky. The arc uses
+        the same `(sin Nu, cos Nu)` convention and marker radius as
+        `plot_sky_marker`.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector and, typically, its sky
+            circle (`plot_sky_circle`).
+        detector : `ToyTracker2D`
+            The detector this source is plotted against.
+        center_angle : `astropy.units.Quantity`
+            Off-axis angle Nu (angle units) at the centre of the arc.
+        extent : `astropy.units.Quantity`
+            Full angular width of the arc (angle units). `360 deg` traces a
+            closed circle.
+        length_unit : `astropy.units.Unit`
+            Unit for the plotted data coordinates. Defaults to cm.
+        marker_radius_factor : float
+            How far outside the sky circle's radius to draw the arc, as a
+            multiple of that radius. Defaults to `_SKY_MARKER_RADIUS_FACTOR`
+            (1.08).
+        **kwargs
+            Passed through to `ax.plot`, overriding the default red-line
+            style.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the arc was plotted on.
+        """
+
+        center = detector.surrounding_circle_center
+        marker_radius = marker_radius_factor * self._sky_radius(detector)
+
+        nu = center_angle + np.linspace(-0.5, 0.5, 200) * extent
+
+        x = (center.x + marker_radius * np.sin(nu)).to_value(length_unit)
+        y = (center.y + marker_radius * np.cos(nu)).to_value(length_unit)
+
+        style = dict(color = 'red', lw = 2)
+        style.update(kwargs)
+        ax.plot(x, y, **style)
+
+        _expand_axes_limits(ax, center, marker_radius, length_unit)
+
+        return ax
+
 class NearFieldSource(Source):
     """
     Abstract base class for sources at a fixed position near the detector,
@@ -387,6 +615,25 @@ class NearFieldSource(Source):
         pass
 
     @property
+    @abstractmethod
+    def position(self):
+        """
+        Position of the source in the detector frame.
+
+        Unlike a far-field source, a near-field source's location is a
+        genuine detector-frame position rather than a direction -- it can
+        sit inside the detector's surrounding circle entirely. Implemented
+        by concrete near-field sources, e.g. `NearPointSource` (added in a
+        later PR).
+
+        Returns
+        -------
+        `Cartesian2D`
+            The source's position, in detector-frame length units (e.g. cm).
+        """
+        pass
+
+    @property
     def normalization(self):
         """
         Total normalization used to scale the spectrum: the rate.
@@ -403,6 +650,46 @@ class NearFieldSource(Source):
             set.
         """
         return self.rate
+
+    def plot(self, ax, detector, length_unit = _PLOT_LENGTH_UNIT, **kwargs):
+        """
+        Draw this source's location on axes already showing
+        `detector.plot()`.
+
+        Near-field sources sit at a fixed detector-frame position -- inside
+        or close to the detector itself -- so they're marked with a red
+        star drawn directly at `self.position`, unlike a far-field source's
+        marker on the sky circle (see `FarFieldSource.plot_sky_marker`).
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source is being plotted against. Present for
+            interface symmetry with the far-field `plot` methods; this
+            source's own position does not depend on it.
+        length_unit : `astropy.units.Unit`
+            Unit for the plotted data coordinates. Defaults to cm, matching
+            `ToyTracker2D.plot()`.
+        **kwargs
+            Passed through to `ax.plot`, overriding the default red-star
+            style.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the source was plotted on.
+        """
+
+        style = dict(marker = '*', color = 'red', markersize = 15, linestyle = 'none')
+        style.update(kwargs)
+        ax.plot(self.position.x.to_value(length_unit),
+               self.position.y.to_value(length_unit),
+               **style)
+
+        return ax
 
 class PointSource(FarFieldSource):
     """
@@ -537,6 +824,38 @@ class PointSource(FarFieldSource):
                       energy = self.spectrum.random_energy(),
                       chirality = chirality)
 
+    def plot(self, ax, detector, **kwargs):
+        """
+        Draw this source's sky location on axes already showing
+        `detector.plot()`.
+
+        Draws the sky circle (`plot_sky_circle`) and a single red star just
+        outside it (`plot_sky_marker`), at this source's `offaxis_angle`.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source is being plotted against; sizes the
+            sky circle and its marker radius.
+        **kwargs
+            Passed through to the star's `ax.plot` call (`plot_sky_marker`),
+            overriding its default red-star style. The sky circle keeps its
+            own default style regardless.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the source was plotted on.
+        """
+
+        self.plot_sky_circle(ax, detector)
+        self.plot_sky_marker(ax, detector, self.offaxis_angle, **kwargs)
+
+        return ax
+
 class IsotropicSource(FarFieldSource):
     """
     A far-field source uniform over the whole sky.
@@ -613,3 +932,37 @@ class IsotropicSource(FarFieldSource):
         self._point_source.offaxis_angle = np.random.uniform(0,360)*u.deg
 
         return self._point_source.random_photon(detector = detector)
+
+    def plot(self, ax, detector, **kwargs):
+        """
+        Draw this source's sky coverage on axes already showing
+        `detector.plot()`.
+
+        Draws the sky circle (`plot_sky_circle`) and a full 360 deg arc
+        just outside it (`plot_sky_arc`), representing uniform coverage of
+        the whole sky -- the same arc primitive `ExtendedSource` and
+        `EarthAlbedoSource` will reuse in later PRs with a narrower extent.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source is being plotted against; sizes the
+            sky circle and its arc radius.
+        **kwargs
+            Passed through to the arc's `ax.plot` call (`plot_sky_arc`),
+            overriding its default red-line style. The sky circle keeps its
+            own default style regardless.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the source was plotted on.
+        """
+
+        self.plot_sky_circle(ax, detector)
+        self.plot_sky_arc(ax, detector, center_angle = 0*u.deg, extent = 360*u.deg, **kwargs)
+
+        return ax
