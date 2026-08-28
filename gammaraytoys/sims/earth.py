@@ -23,6 +23,50 @@ class Earth:
 
         self.radius = radius if radius is not None else R_earth.to(u.km)
 
+    def _check_orbit_radius(self, orbit_radius_value, orbit_radius_quantity):
+        """
+        Raise if any of the plain-float `orbit_radius_value` (in
+        `self.radius`'s unit) does not exceed `self.radius.value`.
+        `orbit_radius_quantity` is only used to render a readable message.
+        """
+
+        if np.any(np.asarray(orbit_radius_value) <= self.radius.value):
+            raise ValueError(
+                f"orbit_radius ({orbit_radius_quantity}) must be strictly "
+                f"greater than the Earth's radius ({self.radius}); the "
+                "spacecraft would be at or below the surface.")
+
+    def _angular_radius_rad(self, orbit_radius_km):
+        """
+        Plain-float core of `angular_radius`: `rho = arcsin(R_E / r)`.
+
+        This is the *only* place the arcsin formula appears in this file;
+        both `angular_radius` and `_is_occulted` route through it so the
+        geometry cannot drift between the two.
+
+        Parameters
+        ----------
+        orbit_radius_km : float or numpy.ndarray of float
+            Distance `r` from the Earth's centre, as a plain float (or
+            array of floats) in the *same unit as `self.radius`* (km by
+            default, but whatever unit this `Earth` was constructed with).
+            Not a `Quantity`. Despite the `_km` suffix (kept to match the
+            unit `Earth()`'s default `self.radius` uses), the actual
+            required unit is `self.radius.unit`.
+
+        Returns
+        -------
+        float or numpy.ndarray of float
+            Angular radius `rho`, in **radians**.
+
+        No validation. `orbit_radius_km` is assumed to already exceed
+        `self.radius.value` (`arcsin` of a value > 1 would otherwise
+        silently produce `nan`, not raise) — this is a private, hot-path
+        helper, and its callers are responsible for validating.
+        """
+
+        return np.arcsin(self.radius.value / orbit_radius_km)
+
     def angular_radius(self, orbit_radius):
         """
         Angular radius of the Earth as seen from a spacecraft at distance
@@ -48,17 +92,61 @@ class Earth:
         """
 
         r = np.asarray(orbit_radius.to_value(self.radius.unit))
-        r_e = self.radius.value
 
-        if np.any(r <= r_e):
-            raise ValueError(
-                f"orbit_radius ({orbit_radius}) must be strictly greater than "
-                f"the Earth's radius ({self.radius}); the spacecraft would be "
-                "at or below the surface.")
+        self._check_orbit_radius(r, orbit_radius)
 
-        rho = np.arcsin(r_e / r)
+        rho_rad = self._angular_radius_rad(r)
 
-        return (rho * u.rad).to(u.deg)
+        return (rho_rad * u.rad).to(u.deg)
+
+    def _is_occulted(self, sky_angle_rad, orbit_angle_rad, orbit_radius_km):
+        """
+        Plain-float, unit-stripped core of `is_occulted`. This is the hot
+        path: PR 3's `InertialSimulator` calls it once per photon, so it
+        takes plain floats (or numpy arrays of floats) throughout and does
+        no `Quantity` work at all.
+
+        **Units, strictly:**
+
+        - `sky_angle_rad`, `orbit_angle_rad` : **radians**, not degrees,
+          not `Quantity`.
+        - `orbit_radius_km` : a plain float (or array), in the *same unit
+          as `self.radius`* (km by default). Despite the name, NOT
+          necessarily kilometres if this `Earth` was built with
+          `radius` in another unit — matches `_angular_radius_rad`.
+
+        Passing degrees, or a `Quantity`, or an `orbit_radius` in the
+        wrong unit, will not raise here: it will silently produce a wrong
+        boolean. This method exists purely for speed; every other caller
+        should go through the public `is_occulted`, which converts once at
+        the boundary and delegates here (see Section 3.5 of
+        `docs/dev/inertial_sim_plan.md`).
+
+        Same geometry as `is_occulted`: `nadir = orbit_angle + pi`,
+        `occulted <=> |wrap(sky_angle - nadir)| < rho`, `wrap(...)` to
+        `[-pi, pi)`, `rho` from `_angular_radius_rad`.
+
+        No validation: `orbit_radius_km` is assumed to already exceed
+        `self.radius.value`. Skipped deliberately for speed on this
+        per-photon hot path (that check, plus the `Quantity` conversions
+        it would need, is exactly the overhead this method exists to
+        avoid) — validating `orbit_radius` is the caller's job, done once
+        by the public `is_occulted`.
+
+        Returns
+        -------
+        bool or numpy.ndarray of bool
+            True wherever the source is occulted by the Earth.
+        """
+
+        rho = self._angular_radius_rad(orbit_radius_km)
+
+        nadir = orbit_angle_rad + np.pi
+
+        # Wrap (sky_angle - nadir) to [-pi, pi).
+        delta = (sky_angle_rad - nadir + np.pi) % (2 * np.pi) - np.pi
+
+        return np.abs(delta) < rho
 
     def is_occulted(self, sky_angle, orbit_angle, orbit_radius):
         """
@@ -71,6 +159,11 @@ class Earth:
         `nadir = orbit_angle + 180 deg`,
         `occulted <=> |wrap(sky_angle - nadir)| < rho`, where `wrap(...)`
         wraps the angle difference to `[-180, 180)` deg.
+
+        This converts its `Quantity` arguments once and delegates the
+        actual geometry to `_is_occulted`; see that method if you are
+        calling this once per photon in a tight loop and the `Quantity`
+        overhead matters.
 
         Parameters
         ----------
@@ -95,14 +188,14 @@ class Earth:
             If any `orbit_radius` does not exceed `self.radius`.
         """
 
-        rho = self.angular_radius(orbit_radius)
+        r = np.asarray(orbit_radius.to_value(self.radius.unit))
 
-        nadir = orbit_angle + 180 * u.deg
+        self._check_orbit_radius(r, orbit_radius)
 
-        # Wrap (sky_angle - nadir) to [-180, 180) deg.
-        delta = (sky_angle - nadir + 180 * u.deg) % (360 * u.deg) - 180 * u.deg
+        sky_angle_rad = sky_angle.to_value(u.rad)
+        orbit_angle_rad = orbit_angle.to_value(u.rad)
 
-        return np.abs(delta) < rho
+        return self._is_occulted(sky_angle_rad, orbit_angle_rad, r)
 
     def plot(self, ax = None):
         """
