@@ -1,3 +1,7 @@
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 import numpy as np
 import pytest
 import astropy.units as u
@@ -130,3 +134,39 @@ def test_is_occulted_array_inputs():
     occulted = earth.is_occulted(sky_angles, orbit_angle, orbit_radius)
 
     np.testing.assert_array_equal(occulted, [True, False, False, False])
+
+
+# --------------------------------------------------------------------------
+# plot()
+# --------------------------------------------------------------------------
+
+def test_plot_returns_axes_and_draws_a_filled_disc():
+    earth = Earth(radius=6371 * u.km)
+
+    ax = earth.plot()
+
+    assert ax is not None
+    # fill() adds a filled Polygon patch; a bare, un-plotted Axes has none.
+    assert len(ax.patches) >= 1
+
+    # Independent sanity bound on the axis limits: nothing this method draws
+    # should extend past the Earth's own radius by more than a small margin
+    # (matplotlib's default autoscale padding is 5%).
+    r = earth.radius.to_value(u.km)
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    assert max(abs(v) for v in xlim + ylim) < 1.5 * r
+
+    plt.close(ax.figure)
+
+
+def test_plot_draws_into_the_given_axes_and_returns_it():
+    fig, ax = plt.subplots()
+    earth = Earth(radius=2000 * u.km)
+
+    returned = earth.plot(ax=ax)
+
+    assert returned is ax
+    assert len(ax.patches) >= 1
+
+    plt.close(fig)

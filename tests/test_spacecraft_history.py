@@ -1,9 +1,14 @@
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 import numpy as np
 import pytest
 import astropy.units as u
 from astropy.constants import G, M_earth
 
-from gammaraytoys.sims import SpacecraftHistory, Earth
+from gammaraytoys.sims import SpacecraftHistory, SpacecraftInterval, Earth
+from gammaraytoys.sims.spacecraft_history import _solve_kepler_equation
 
 MU = (G * M_earth).to_value(u.km**3 / u.s**2)  # gravitational parameter, independent of the code under test
 
@@ -70,6 +75,39 @@ def test_ori_round_trip_preserves_full_precision_values(tmp_path):
         assert a.livetime.to_value(u.s) == pytest.approx(b.livetime.to_value(u.s), rel=1e-12)
 
 
+def test_open_raises_on_header_only_file(tmp_path):
+    # 0 data rows: even the "at least 2 rows" message must fire, not some
+    # unrelated crash inside pandas/astropy.
+    path = tmp_path / 'header_only.ori'
+    path.write_text('time_s,orbit_radius_km,orbit_angle_deg,attitude_deg,uptime_s\n')
+
+    with pytest.raises(ValueError, match='row'):
+        SpacecraftHistory.open(path)
+
+
+def test_open_raises_naming_a_missing_column(tmp_path):
+    path = tmp_path / 'missing_column.ori'
+    path.write_text(
+        "time_s,orbit_radius_km,orbit_angle_deg,attitude_deg\n"  # uptime_s absent
+        "0.0,7000.0,0.0,90.0\n"
+        "10.0,7000.0,10.0,100.0\n")
+
+    with pytest.raises(ValueError, match='uptime_s'):
+        SpacecraftHistory.open(path)
+
+
+def test_open_raises_naming_a_misspelled_column(tmp_path):
+    path = tmp_path / 'misspelled_column.ori'
+    path.write_text(
+        # attitude_deg misspelled as atttitude_deg
+        "time_s,orbit_radius_km,orbit_angle_deg,atttitude_deg,uptime_s\n"
+        "0.0,7000.0,0.0,90.0,5.0\n"
+        "10.0,7000.0,10.0,100.0,5.0\n")
+
+    with pytest.raises(ValueError, match='attitude_deg'):
+        SpacecraftHistory.open(path)
+
+
 # --------------------------------------------------------------------------
 # Validation
 # --------------------------------------------------------------------------
@@ -90,6 +128,16 @@ def test_requires_strictly_increasing_timestamps():
             orbit_angle=np.array([0.0, 10.0, 20.0, 30.0]) * u.deg,
             attitude=np.array([0.0, 10.0, 20.0, 30.0]) * u.deg,
             uptime=np.array([1.0, 1.0, 1.0, 0.0]) * u.s)
+
+
+def test_requires_all_row_arrays_to_have_matching_length():
+    with pytest.raises(ValueError, match='same length'):
+        SpacecraftHistory(
+            time=np.array([0.0, 10.0, 20.0]) * u.s,
+            orbit_radius=np.array([7000.0, 7000.0]) * u.km,  # one row short
+            orbit_angle=np.array([0.0, 10.0, 20.0]) * u.deg,
+            attitude=np.array([0.0, 10.0, 20.0]) * u.deg,
+            uptime=np.array([5.0, 5.0, 0.0]) * u.s)
 
 
 def test_requires_at_least_two_rows():
@@ -157,6 +205,61 @@ def test_orbit_radius_must_exceed_earth_radius():
             earth=earth)
 
 
+@pytest.mark.parametrize('bad_column, ori_column', [
+    ('orbit_radius', 'orbit_radius_km'),
+    ('orbit_angle', 'orbit_angle_deg'),
+    ('attitude', 'attitude_deg'),
+    ('uptime', 'uptime_s'),
+])
+def test_validate_raises_on_non_finite_interval_value(bad_column, ori_column):
+    # Each of the four interval columns is checked independently (Section
+    # 4.2's NaN note); put a NaN in interval row 0 (not the terminator) of
+    # each column in turn and check it is caught, and named, on its own.
+    kwargs = dict(
+        time=np.array([0.0, 10.0, 20.0]) * u.s,
+        orbit_radius=np.array([7000.0, 7000.0, 7000.0]) * u.km,
+        orbit_angle=np.array([0.0, 10.0, 20.0]) * u.deg,
+        attitude=np.array([0.0, 10.0, 20.0]) * u.deg,
+        uptime=np.array([5.0, 5.0, 0.0]) * u.s,
+    )
+    values = kwargs[bad_column]
+    tainted = values.value.copy()
+    tainted[0] = np.nan
+    kwargs[bad_column] = tainted * values.unit
+
+    with pytest.raises(ValueError, match=ori_column):
+        SpacecraftHistory(**kwargs)
+
+
+def test_terminator_row_may_contain_non_finite_values():
+    # Section 4.2: the terminator's pose and uptime are never read, so a
+    # NaN there must not raise -- this is the documented exemption from the
+    # non-finite check above.
+    history = SpacecraftHistory(
+        time=np.array([0.0, 10.0, 20.0]) * u.s,
+        orbit_radius=np.array([7000.0, 7000.0, np.nan]) * u.km,
+        orbit_angle=np.array([0.0, 10.0, np.nan]) * u.deg,
+        attitude=np.array([0.0, 10.0, np.nan]) * u.deg,
+        uptime=np.array([5.0, 5.0, np.nan]) * u.s)  # must not raise
+
+    assert history.nintervals == 2
+    assert history.total_livetime == 10 * u.s
+
+
+def test_terminator_row_may_contain_the_999999_placeholder():
+    # The 999999 sentinel used by the example .ori file in Section 4.1 must
+    # be just as acceptable in the terminator row as a NaN.
+    history = SpacecraftHistory(
+        time=np.array([0.0, 10.0, 20.0]) * u.s,
+        orbit_radius=np.array([7000.0, 7000.0, 999999.0]) * u.km,
+        orbit_angle=np.array([0.0, 10.0, 999999.0]) * u.deg,
+        attitude=np.array([0.0, 10.0, 999999.0]) * u.deg,
+        uptime=np.array([5.0, 5.0, 999999.0]) * u.s)
+
+    assert history.nintervals == 2
+    assert history.total_livetime == 10 * u.s
+
+
 def test_from_elliptical_orbit_raises_for_subsurface_perigee():
     # a(1-e) = 6000 km < R_E ~ 6378.1 km: the orbit passes through the planet.
     with pytest.raises(ValueError):
@@ -166,6 +269,38 @@ def test_from_elliptical_orbit_raises_for_subsurface_perigee():
     # via eccentricity rather than a small semi-major axis.
     with pytest.raises(ValueError):
         SpacecraftHistory.from_elliptical_orbit(semi_major_axis=10000 * u.km, eccentricity=0.5)
+
+
+def test_from_elliptical_orbit_rejects_eccentricity_out_of_range():
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, eccentricity=-0.1)
+
+    with pytest.raises(ValueError):  # e == 1 is parabolic, excluded by the half-open [0, 1)
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, eccentricity=1.0)
+
+
+def test_from_elliptical_orbit_rejects_livetime_fraction_out_of_range():
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, livetime_fraction=-0.1)
+
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, livetime_fraction=1.1)
+
+
+def test_from_elliptical_orbit_rejects_non_positive_duration():
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, duration=0 * u.s)
+
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, duration=-10 * u.s)
+
+
+def test_from_elliptical_orbit_rejects_non_positive_time_step():
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, time_step=0 * u.s)
+
+    with pytest.raises(ValueError):
+        SpacecraftHistory.from_elliptical_orbit(semi_major_axis=7000 * u.km, time_step=-1 * u.s)
 
 
 def test_from_elliptical_orbit_accepts_perigee_that_just_clears_the_surface():
@@ -380,3 +515,243 @@ def test_default_duration_is_one_orbital_period(tmp_path):
 
     angle_start_deg = intervals[0].orbit_angle.to_value(u.deg)
     assert terminator_orbit_angle_deg == pytest.approx(angle_start_deg + 360.0, abs=1e-6)
+
+
+# --------------------------------------------------------------------------
+# Multi-orbit duration / revolution unwrapping
+# --------------------------------------------------------------------------
+
+def test_multi_orbit_duration_unwraps_orbit_angle_monotonically():
+    # The highest-risk code in this module: nu must keep advancing past 360
+    # deg on every subsequent orbit instead of wrapping back to its
+    # atan2-principal range. Check both the physical invariant (orbit_angle
+    # strictly increasing throughout, since theta only ever advances for a
+    # bound orbit) and the closed-form invariant (each period boundary is
+    # exactly 360 deg * k past the start, by definition of the orbital
+    # period), neither of which comes from anything the implementation
+    # prints.
+    a = 40000.0 * u.km  # perigee a(1-e) = 8000 km, clear of the ~6378 km Earth
+    e = 0.8
+    period_s = 2 * np.pi * np.sqrt(a.to_value(u.km)**3 / MU)
+    n_orbits = 3
+    n_per_orbit = 40  # coarse: only period boundaries and monotonicity matter here
+
+    history = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=a, eccentricity=e,
+        duration=n_orbits * period_s * u.s,
+        time_step=(period_s / n_per_orbit) * u.s)
+
+    start_times = np.array([iv.start_time.to_value(u.s) for iv in history])
+    orbit_angles = np.array([iv.orbit_angle.to_value(u.deg) for iv in history])
+    stop_time = list(history)[-1].stop_time.to_value(u.s)
+
+    all_times = np.append(start_times, stop_time)
+    # theta(t=0) == theta at the end of orbit n_orbits, plus n_orbits full
+    # turns, by periodicity.
+    all_angles = np.append(orbit_angles, orbit_angles[0] + 360.0 * n_orbits)
+
+    assert np.all(np.diff(all_angles) > 0), "orbit_angle must be strictly increasing"
+
+    for k in range(n_orbits + 1):
+        t_k = k * period_s
+        idx = int(np.argmin(np.abs(all_times - t_k)))
+        assert all_times[idx] == pytest.approx(t_k, abs=1e-6)
+        assert all_angles[idx] == pytest.approx(360.0 * k, abs=1e-6)
+
+
+# --------------------------------------------------------------------------
+# Kepler solver convergence
+# --------------------------------------------------------------------------
+
+def test_kepler_solver_raises_runtime_error_at_extreme_eccentricity():
+    # Newton from E0 = M converges to machine precision through e = 0.95 and
+    # diverges above roughly 0.96 (stated behaviour of the solver); at
+    # e = 0.999 it must raise rather than silently hand back a
+    # half-converged E.
+    mean_anomaly = np.linspace(0.0, 2 * np.pi, 500, endpoint=False)
+
+    with pytest.raises(RuntimeError):
+        _solve_kepler_equation(mean_anomaly, eccentricity=0.999)
+
+
+# --------------------------------------------------------------------------
+# Untested parameter paths
+# --------------------------------------------------------------------------
+
+def test_livetime_fraction_scales_uptime_by_the_requested_fraction():
+    fraction = 0.4
+
+    history = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=7000 * u.km, eccentricity=0.0,
+        time_step=500 * u.s, livetime_fraction=fraction)
+
+    for interval in history:
+        dt_s = (interval.stop_time - interval.start_time).to_value(u.s)
+        assert interval.livetime.to_value(u.s) == pytest.approx(fraction * dt_s, rel=1e-9)
+
+
+def test_initial_time_shifts_the_absolute_clock_not_the_orbit():
+    # t_periapsis = 0 on the absolute clock, so a history generated with
+    # initial_time = period/4 must start at exactly the pose a
+    # initial_time = 0 history has at its own t = period/4 row.
+    a = 10000.0 * u.km  # perigee a(1-e) = 7000 km, clear of the ~6378 km Earth
+    e = 0.3
+    period_s = 2 * np.pi * np.sqrt(a.to_value(u.km)**3 / MU)
+    n = 40  # divisible by 4, so period/4 lands exactly on a row
+    step = (period_s / n) * u.s
+
+    baseline = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=a, eccentricity=e, time_step=step, duration=period_s * u.s)
+    shifted = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=a, eccentricity=e, time_step=step, duration=step,
+        initial_time=(period_s / 4) * u.s)
+
+    quarter_row = list(baseline)[n // 4]
+    shifted_row = list(shifted)[0]
+
+    assert shifted_row.start_time.to_value(u.s) == pytest.approx(period_s / 4, rel=1e-9)
+    assert shifted_row.orbit_radius.to_value(u.km) == pytest.approx(
+        quarter_row.orbit_radius.to_value(u.km), rel=1e-9)
+    assert shifted_row.orbit_angle.to_value(u.deg) == pytest.approx(
+        quarter_row.orbit_angle.to_value(u.deg), rel=1e-9)
+
+
+def test_argument_of_periapsis_shifts_orbit_angle_by_a_constant():
+    # theta = nu + omega: omega is pose-independent of the true anomaly, so
+    # rotating it must shift orbit_angle by exactly omega at every row,
+    # while leaving orbit_radius (a function of E alone) untouched.
+    a = 15000.0 * u.km  # perigee a(1-e) = 7500 km, clear of the ~6378 km Earth
+    e = 0.5
+    omega = 45 * u.deg
+    step = 300 * u.s
+
+    unrotated = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=a, eccentricity=e, time_step=step)
+    rotated = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=a, eccentricity=e, time_step=step, argument_of_periapsis=omega)
+
+    for iv0, iv1 in zip(unrotated, rotated):
+        assert iv0.orbit_radius == iv1.orbit_radius
+        diff_deg = (iv1.orbit_angle - iv0.orbit_angle).to_value(u.deg) % 360.0
+        assert diff_deg == pytest.approx(omega.to_value(u.deg), abs=1e-9)
+
+
+# --------------------------------------------------------------------------
+# SpacecraftInterval.mid_time
+# --------------------------------------------------------------------------
+
+def test_interval_mid_time_is_the_average_of_start_and_stop():
+    interval = SpacecraftInterval(
+        start_time=10 * u.s, stop_time=30 * u.s, livetime=5 * u.s,
+        orbit_radius=7000 * u.km, orbit_angle=0 * u.deg, attitude=0 * u.deg)
+
+    assert interval.mid_time == 20 * u.s
+
+
+def test_history_iteration_mid_time_matches_start_stop_average():
+    history = _small_history()
+
+    for interval in history:
+        assert interval.mid_time == 0.5 * (interval.start_time + interval.stop_time)
+
+
+# --------------------------------------------------------------------------
+# earth property
+# --------------------------------------------------------------------------
+
+def test_earth_property_returns_the_earth_passed_to_init():
+    earth = Earth(radius=6371 * u.km)
+    history = SpacecraftHistory(
+        time=np.array([0.0, 10.0, 20.0]) * u.s,
+        orbit_radius=np.array([7000.0, 7000.0, 7000.0]) * u.km,
+        orbit_angle=np.array([0.0, 10.0, 20.0]) * u.deg,
+        attitude=np.array([0.0, 10.0, 20.0]) * u.deg,
+        uptime=np.array([5.0, 5.0, 0.0]) * u.s,
+        earth=earth)
+
+    assert history.earth is earth
+    assert history.earth.radius == 6371 * u.km
+
+
+def test_earth_property_has_no_setter():
+    history = _small_history()
+
+    with pytest.raises(AttributeError):
+        history.earth = Earth()
+
+
+def test_plot_defaults_to_the_stored_earth(monkeypatch):
+    earth = Earth(radius=6371 * u.km)
+    history = SpacecraftHistory(
+        time=np.array([0.0, 10.0, 20.0]) * u.s,
+        orbit_radius=np.array([7000.0, 7000.0, 7000.0]) * u.km,
+        orbit_angle=np.array([0.0, 10.0, 20.0]) * u.deg,
+        attitude=np.array([0.0, 10.0, 20.0]) * u.deg,
+        uptime=np.array([5.0, 5.0, 0.0]) * u.s,
+        earth=earth)
+
+    seen = []
+    original_plot = Earth.plot
+
+    def spy(self, ax=None):
+        seen.append(self)
+        return original_plot(self, ax=ax)
+
+    monkeypatch.setattr(Earth, 'plot', spy)
+
+    ax = history.plot()
+
+    assert seen == [earth]
+    plt.close(ax.figure)
+
+
+# --------------------------------------------------------------------------
+# plot()
+# --------------------------------------------------------------------------
+
+def test_history_plot_returns_axes_and_draws_orbit_and_earth():
+    history = _small_history()
+
+    ax = history.plot()
+
+    assert ax is not None
+    assert len(ax.lines) >= 1     # the orbit path
+    assert len(ax.patches) >= 1   # the Earth disc
+
+    plt.close(ax.figure)
+
+
+def test_history_plot_nposes_greater_than_nintervals_does_not_crash():
+    history = _small_history()  # nintervals == 3
+    assert history.nintervals == 3
+
+    ax = history.plot(nposes=100)
+
+    assert ax is not None
+    plt.close(ax.figure)
+
+
+def test_plot_ignores_the_terminator_pose_when_it_is_a_placeholder():
+    # Before the fix, the terminator's 999999 placeholder leaked into the
+    # plotted data and blew out the axis limits by more than an order of
+    # magnitude. The independent sanity bound here -- twice the orbit
+    # radius -- is far below that failure mode and comfortably covers the
+    # correct extent (orbit radius, plus attitude arrows of at most 8% of
+    # the max radius, plus matplotlib's autoscale padding).
+    orbit_radius_km = 7000.0
+    history = SpacecraftHistory(
+        time=np.array([0.0, 1000.0, 2000.0, 3000.0]) * u.s,
+        orbit_radius=np.array([orbit_radius_km] * 3 + [999999.0]) * u.km,
+        orbit_angle=np.array([0.0, 90.0, 180.0, 999999.0]) * u.deg,
+        attitude=np.array([0.0, 90.0, 180.0, 999999.0]) * u.deg,
+        uptime=np.array([500.0, 500.0, 500.0, 999999.0]) * u.s)
+
+    ax = history.plot()
+
+    bound = 2 * orbit_radius_km
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    assert max(abs(v) for v in xlim) < bound
+    assert max(abs(v) for v in ylim) < bound
+
+    plt.close(ax.figure)
