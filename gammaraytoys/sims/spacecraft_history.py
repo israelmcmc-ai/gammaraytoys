@@ -42,6 +42,17 @@ class SpacecraftInterval:
     attitude : Quantity
         Spacecraft attitude `A` during this interval: the inertial angle of
         the detector's +y axis, CCW from inertial +X, angle units.
+    earth : Earth
+        The Earth model this pose is to be interpreted against -- what
+        occults a far-field source seen from here (see
+        `FarFieldSource.random_photon`). A pose is not fully specified
+        without it: the spacecraft's position and attitude alone do not say
+        how big the occulting body is. Defaults to `Earth()` when not given,
+        exactly as `SpacecraftHistory.__init__` does, so a hand-built
+        interval is always usable; `SpacecraftHistory.__iter__` fills it in
+        with the history's own `earth` instead, and `InertialSimulator`
+        re-stamps it with the `earth` it was constructed with, so that a
+        simulation only ever has one Earth in play.
     """
 
     start_time: u.Quantity
@@ -50,6 +61,14 @@ class SpacecraftInterval:
     orbit_radius: u.Quantity
     orbit_angle: u.Quantity
     attitude: u.Quantity
+    earth: Earth = None
+
+    def __post_init__(self):
+        """Fill in the default `Earth()` when no `earth` was given. Uses
+        `object.__setattr__` because the dataclass is frozen."""
+
+        if self.earth is None:
+            object.__setattr__(self, 'earth', Earth())
 
     @property
     def mid_time(self):
@@ -507,9 +526,12 @@ class SpacecraftHistory:
         ------
         SpacecraftInterval
             Interval `i`, spanning `[time[i], time[i+1])`, with pose and
-            livetime taken from row `i`. The terminator row (index `N`)
-            never yields an interval of its own; it only supplies the
-            `stop_time` of the last one.
+            livetime taken from row `i`, and `earth` set to this history's
+            own `earth` -- the same instance the orbit was validated
+            against, so that occultation downstream cannot be computed
+            against a different Earth. The terminator row (index `N`) never
+            yields an interval of its own; it only supplies the `stop_time`
+            of the last one.
         """
 
         for i in range(self.nintervals):
@@ -520,6 +542,7 @@ class SpacecraftHistory:
                 orbit_radius = self._orbit_radius_km[i] * u.km,
                 orbit_angle = self._orbit_angle_deg[i] * u.deg,
                 attitude = self._attitude_deg[i] * u.deg,
+                earth = self._earth,
             )
 
     def plot(self, ax = None, earth = None, nposes = 12):

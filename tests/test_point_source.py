@@ -4,7 +4,7 @@ import pytest
 
 from gammaraytoys.sims import (PointSource, IsotropicSource,
                                MonoenergeticSpectrum, PowerLawSpectrum,
-                               Photon)
+                               Photon, SpacecraftInterval)
 
 
 def test_pointsource_flux_from_pivot():
@@ -240,15 +240,28 @@ def test_pointsource_random_photon_pose_is_accepted_and_ignored(tracker):
     assert photon_with_pose.position.y == photon_no_pose.position.y
 
 
-def test_isotropic_source_random_photon_pose_is_accepted_and_ignored(tracker):
+def test_isotropic_source_random_photon_unocculted_pose_changes_nothing(tracker):
+    # PR 1 asserted here that `pose` was a pure no-op for IsotropicSource.
+    # PR 3 gives it one real effect and one only: a photon whose direction
+    # falls behind the Earth is discarded. Everything else -- the direction
+    # itself, the energy, the injection position, and the order in which
+    # they consume random numbers -- must still be untouched by the pose, so
+    # a pose that occults nothing has to reproduce the pose-less photon
+    # exactly. The orbit here is far enough out (10^6 km, well past the
+    # Moon) that the Earth subtends ~0.4 deg and no direction realistically
+    # hits it; the seed makes that deterministic.
     spec = MonoenergeticSpectrum(1 * u.MeV)
     source = IsotropicSource(spectrum=spec, flux=1 / u.cm / u.s)
+
+    distant_pose = SpacecraftInterval(
+        start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+        orbit_radius=1e6 * u.km, orbit_angle=0 * u.deg, attitude=0 * u.deg)
 
     np.random.seed(54321)
     photon_no_pose = source.random_photon(tracker)
 
     np.random.seed(54321)
-    photon_with_pose = source.random_photon(tracker, pose="not a real pose yet")
+    photon_with_pose = source.random_photon(tracker, pose=distant_pose)
 
     assert photon_with_pose.direction == photon_no_pose.direction
     assert photon_with_pose.energy == photon_no_pose.energy

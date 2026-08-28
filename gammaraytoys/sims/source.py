@@ -4,6 +4,7 @@ import numpy as np
 import astropy.units as u
 from .event import Photon
 from .spectrum import MonoenergeticSpectrum
+from .transform import sky_angle_to_offaxis, offaxis_to_sky_angle
 from copy import copy
 import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
@@ -269,18 +270,18 @@ class Source(ABC):
         pose : `SpacecraftInterval` or None
             Spacecraft pose to evaluate the source in. `None` (the default)
             means pure detector-frame mode -- the source's `random_photon`
-            behaves exactly as it did before the inertial simulator existed.
-            A non-`None` pose is meaningful starting with the inertial
-            simulator (see `InertialSimulator`); it is accepted here so the
-            signature is uniform across sources, but has no effect yet.
+            behaves exactly as it did before the inertial simulator existed,
+            which is the path the tutorials take. A non-`None` pose puts the
+            source in inertial mode: it is aimed through the spacecraft's
+            attitude (see `gammaraytoys.sims.transform`) and its photons are
+            subject to Earth occultation (see `FarFieldSource.occultable`).
 
         Returns
         -------
         `Photon` or None
             A photon in the detector frame, ready for
             `detector.simulate_event()`, or `None` if the photon was
-            occulted (not possible yet -- occultation is introduced by the
-            inertial simulator).
+            occulted by the Earth.
         """
         pass
 
@@ -303,8 +304,10 @@ class Source(ABC):
             `throwing_plane_size` sets the overall scale.
         pose : `SpacecraftInterval` or None
             Spacecraft pose to evaluate the source in. `None` means pure
-            detector-frame mode. Meaningful starting with the inertial
-            simulator; has no effect yet.
+            detector-frame mode. Every source in this package has a
+            pose-independent rate today -- the pose is threaded through for
+            the (later) Earth albedo, whose apparent flux depends on the
+            orbital radius.
 
         Returns
         -------
@@ -397,6 +400,68 @@ class FarFieldSource(Source):
             return None
 
         return flux * detector.throwing_plane_size
+
+    @property
+    def occultable(self):
+        """
+        Whether this source's photons can be blocked by the Earth.
+
+        `True` for every source whose photons genuinely arrive from the
+        distant sky, which is every far-field source in this package except
+        the Earth albedo: `EarthAlbedoSource` (added in a later PR)
+        overrides this to `False`, because its photons come from the
+        Earth's direction *by construction* and a blanket occultation test
+        would reject all of them (Section 8.1 of the plan).
+
+        Only consulted when a source is drawn with a `pose`; in pure
+        detector-frame mode there is no Earth and nothing to occult
+        against.
+
+        Returns
+        -------
+        bool
+            `True` -- Earth occultation applies to this source.
+        """
+        return True
+
+    def _occulted(self, sky_angle, pose):
+        """
+        Whether a photon arriving from inertial sky angle `sky_angle` is
+        blocked by the Earth at this pose.
+
+        This is the per-photon hot path, so it goes straight to
+        `Earth._is_occulted` -- plain floats, radians, `orbit_radius` in the
+        Earth's own radius unit -- rather than through the public,
+        `Quantity`-converting `Earth.is_occulted`, which is roughly an order
+        of magnitude more expensive. The public method is a thin wrapper
+        over the same private one, so there is a single implementation of
+        the geometry and no risk of the two drifting apart.
+
+        Parameters
+        ----------
+        sky_angle : `astropy.units.Quantity`
+            Inertial direction the photon arrives *from*, `lambda`, CCW from
+            inertial +X (angle units).
+        pose : `SpacecraftInterval`
+            The spacecraft pose, supplying `orbit_angle`, `orbit_radius` and
+            the `earth` to test against.
+
+        Returns
+        -------
+        bool
+            `True` if the photon is occulted and must be discarded. Always
+            `False` when `self.occultable` is `False`.
+        """
+
+        if not self.occultable:
+            return False
+
+        earth = pose.earth
+
+        return bool(earth._is_occulted(
+            sky_angle.to_value(u.rad),
+            pose.orbit_angle.to_value(u.rad),
+            pose.orbit_radius.to_value(earth.radius.unit)))
 
     def _sky_radius(self, detector):
         """
@@ -693,25 +758,44 @@ class NearFieldSource(Source):
 
 class PointSource(FarFieldSource):
     """
-    A far-field source at a fixed off-axis angle in the detector frame.
+    A far-field source at a single fixed direction.
+
+    That direction is given in exactly one of two frames, and which one is
+    used decides how the source behaves for the rest of its life:
+
+    - **detector-frame** (`offaxis_angle`): the source sits at a fixed
+      off-axis angle Nu, the detector is the centre of the universe, and
+      `pose` is ignored entirely. This is the original behaviour and the one
+      the tutorials and `Simulator` use.
+    - **inertial** (`sky_angle`): the source sits at a fixed direction
+      `lambda` on the inertial sky. Its off-axis angle is then whatever the
+      spacecraft's attitude makes it, `Nu = A - lambda`, recomputed from the
+      `pose` for every photon, and the photon is discarded when the Earth is
+      in the way. This is the mode `InertialSimulator` uses.
+
+    Give one or the other, never both and never neither.
 
     Photons are thrown from a plane tangent to the detector's surrounding
     circle, perpendicular to the direction to the source, and fly along that
     direction.
     """
 
-    def __init__(self, offaxis_angle, spectrum,
+    def __init__(self, offaxis_angle = None, spectrum = None,
                  flux = None, flux_pivot = None, pivot_energy = None,
-                 chirality = None, chirality_degree = 0):
+                 chirality = None, chirality_degree = 0,
+                 sky_angle = None):
         """
         Parameters
         ----------
-        offaxis_angle : `astropy.units.Quantity`
+        offaxis_angle : `astropy.units.Quantity`, optional
             Off-axis angle Nu in the detector frame (angle units), CCW from
             detector zenith (+y). See the module-level convention in
-            `ToyTracker2D`.
+            `ToyTracker2D`. Mutually exclusive with `sky_angle`: give
+            exactly one of the two.
         spectrum : `Spectrum`
-            The source's energy spectrum shape.
+            The source's energy spectrum shape. Required -- it only carries
+            a `None` default so that `offaxis_angle` could gain one without
+            reordering the existing positional arguments.
         flux : `astropy.units.Quantity`, optional
             Total flux integrated over the whole sky, in `1/cm/s`. Needed
             for normalization (`simulated_rate`, `diff_flux`, ...); either
@@ -736,12 +820,41 @@ class PointSource(FarFieldSource):
             source is unpolarized unless asked otherwise. Ignored if
             `chirality` is `None`, which is itself the default -- the
             photon then picks its own chirality at random.
+        sky_angle : `astropy.units.Quantity`, optional
+            Direction `lambda` on the inertial sky (angle units), CCW from
+            inertial +X and pointing *toward* the source. Mutually exclusive
+            with `offaxis_angle`: give exactly one of the two. A source
+            given a `sky_angle` can only be drawn from with a `pose` (see
+            `random_photon`).
+
+        Raises
+        ------
+        ValueError
+            If both or neither of `offaxis_angle` and `sky_angle` are given,
+            or if no `spectrum` is given.
         """
+
+        if spectrum is None:
+            raise ValueError("PointSource requires a spectrum.")
+
+        if (offaxis_angle is None) == (sky_angle is None):
+            raise ValueError(
+                "A PointSource is aimed either in the detector frame, with "
+                "`offaxis_angle`, or on the inertial sky, with `sky_angle`. "
+                "Give exactly one of the two; got "
+                f"offaxis_angle={offaxis_angle}, sky_angle={sky_angle}.")
 
         self._spectrum = spectrum
         self.chirality = chirality
         self.chirality_degree = chirality_degree
 
+        self.sky_angle = sky_angle
+
+        # For an inertial (sky_angle) source this starts out None and is
+        # re-aimed from the pose on every draw, exactly the way
+        # IsotropicSource re-aims its own internal PointSource; the throwing
+        # plane cache below is keyed on the off-axis angle, so re-aiming is
+        # safe.
         self.offaxis_angle = offaxis_angle
 
         if flux is not None:
@@ -794,24 +907,56 @@ class PointSource(FarFieldSource):
 
     def random_photon(self, detector, pose = None):
         """
-        Draw one random photon aimed at the detector from `offaxis_angle`.
+        Draw one random photon aimed at the detector.
+
+        For a detector-frame source (built with `offaxis_angle`) this simply
+        throws from that fixed off-axis angle and `pose` is ignored
+        entirely, occultation included -- there is no sky direction to
+        occult.
+
+        For an inertial source (built with `sky_angle`) the source is first
+        re-aimed at `Nu = A - lambda` using the pose's attitude, and the
+        photon is then discarded if the Earth is between the spacecraft and
+        the source.
 
         Parameters
         ----------
         detector : `ToyTracker2D`
             The detector the photon is thrown at.
         pose : `SpacecraftInterval` or None
-            Ignored. `PointSource` is aimed by a fixed detector-frame
-            `offaxis_angle`; pose-dependent aiming arrives with the inertial
-            simulator, which re-aims a `PointSource` by `sky_angle` instead.
+            Spacecraft pose. Ignored for a detector-frame source; required
+            for an inertial one, whose off-axis angle is undefined without
+            an attitude.
 
         Returns
         -------
-        `Photon`
+        `Photon` or None
             A photon starting on the throwing plane, flying along
             `270 deg - offaxis_angle`, with an energy drawn from `spectrum`
-            and a chirality drawn per `chirality`/`chirality_degree`.
+            and a chirality drawn per `chirality`/`chirality_degree`;
+            `None` if the source was occulted by the Earth at this pose.
+
+        Raises
+        ------
+        ValueError
+            If this source was given a `sky_angle` and no `pose`.
         """
+
+        if self.sky_angle is not None:
+
+            if pose is None:
+                raise ValueError(
+                    "This PointSource is aimed on the inertial sky "
+                    f"(sky_angle = {self.sky_angle}), so it needs a "
+                    "spacecraft pose to know where that is in the detector "
+                    "frame. Pass `pose`, or build the source with "
+                    "`offaxis_angle` instead for pure detector-frame use.")
+
+            # Re-aim at Nu = A - lambda for this pose (Section 3.4).
+            self.offaxis_angle = sky_angle_to_offaxis(self.sky_angle, pose.attitude)
+
+            if self._occulted(self.sky_angle, pose):
+                return None
 
         chirality = copy(self.chirality)
         if chirality is not None:
@@ -832,6 +977,11 @@ class PointSource(FarFieldSource):
         Draws the sky circle (`plot_sky_circle`) and a single red star just
         outside it (`plot_sky_marker`), at this source's `offaxis_angle`.
 
+        The plot is in the detector frame, so an inertial (`sky_angle`)
+        source can only be drawn once it has been aimed at a pose -- i.e.
+        after at least one `random_photon(detector, pose)` call, which is
+        what sets its `offaxis_angle`.
+
         Parameters
         ----------
         ax : `matplotlib.axes.Axes`
@@ -849,7 +999,22 @@ class PointSource(FarFieldSource):
         -------
         `matplotlib.axes.Axes`
             The axes the source was plotted on.
+
+        Raises
+        ------
+        RuntimeError
+            If this is an inertial source that has not been aimed at a pose
+            yet, so it has no detector-frame direction to draw.
         """
+
+        if self.offaxis_angle is None:
+            raise RuntimeError(
+                "This PointSource is aimed on the inertial sky "
+                f"(sky_angle = {self.sky_angle}) and has not been evaluated "
+                "at a spacecraft pose yet, so it has no detector-frame "
+                "off-axis angle to plot. Draw a photon with a pose first, or "
+                "plot it at an off-axis angle of your choosing with "
+                "`plot_sky_marker`.")
 
         self.plot_sky_circle(ax, detector)
         self.plot_sky_marker(ax, detector, self.offaxis_angle, **kwargs)
@@ -910,26 +1075,44 @@ class IsotropicSource(FarFieldSource):
         """
         Draw one random photon from a uniformly random direction.
 
+        A uniform sky is uniform in either frame, so the off-axis angle is
+        drawn the same way with or without a pose. What a pose adds is
+        occultation: the drawn direction is converted back to an inertial
+        sky angle, `lambda = A - Nu`, and the photon is discarded if the
+        Earth is in the way. Drawing the direction *first* and then
+        rejecting is deliberate -- it needs no bespoke truncated-sky
+        sampling, and it is what makes the simulator's Poisson mean the
+        unocculted one (Section 6 of the plan).
+
         Parameters
         ----------
         detector : `ToyTracker2D`
             The detector the photon is thrown at.
         pose : `SpacecraftInterval` or None
-            Ignored. See `Source.random_photon`.
+            Spacecraft pose. `None` (the default) means pure detector-frame
+            mode, with no occultation.
 
         Returns
         -------
-        `Photon`
+        `Photon` or None
             A photon thrown from a uniformly random off-axis angle in
             `[0, 360) deg`, with an energy drawn from `spectrum` and a
-            chirality drawn per `chirality`/`chirality_degree`.
+            chirality drawn per `chirality`/`chirality_degree`; `None` if
+            that direction was occulted by the Earth at this pose.
         """
 
         # Re-sync in case these were changed after construction
         self._point_source.chirality = self.chirality
         self._point_source.chirality_degree = self.chirality_degree
 
-        self._point_source.offaxis_angle = np.random.uniform(0,360)*u.deg
+        offaxis_angle = np.random.uniform(0,360)*u.deg
+        self._point_source.offaxis_angle = offaxis_angle
+
+        if pose is not None:
+            sky_angle = offaxis_to_sky_angle(offaxis_angle, pose.attitude)
+
+            if self._occulted(sky_angle, pose):
+                return None
 
         return self._point_source.random_photon(detector = detector)
 
