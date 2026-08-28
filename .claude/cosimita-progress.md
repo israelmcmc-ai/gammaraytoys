@@ -54,14 +54,27 @@ Decided by the maintainer; to be applied together with the PR 1 reviewer's findi
 in a single follow-up commit on `claude/cosimita-pr1-source-hierarchy`.
 
 - **`plot_spectrum()` must serve both source families.** Use the flux for a
-  `FarFieldSource` and the rate for a `NearFieldSource`, dispatching on the base
-  class rather than introducing a shared `normalization` property, and adjust the
-  y-axis units to match: `1/(erg cm s)` and `erg/(cm s)` for far field, `1/(erg s)`
+  `FarFieldSource` and the rate for a `NearFieldSource`, and adjust the y-axis units
+  to match: `1/(erg cm s)` and `erg/(cm s)` for far field, `1/(erg s)`
   and `erg/s` for near field. `diff_flux`, `integrate_flux` and
   `discretize_spectrum` feed `plot_spectrum` and must stay consistent with it.
   This requires `NearFieldSource` to expose a `rate` property, which PR 1 did not
   add; PR 4's `NearPointSource` will implement it. Without this, `NearPointSource`
   cannot plot its spectrum at all.
+
+  **Implemented polymorphically**, via an abstract `Source.normalization` that
+  `FarFieldSource` resolves to `flux` and `NearFieldSource` to `rate`, rather than
+  by `isinstance` branching inside `plot_spectrum`. Same dispatch-by-base-class
+  behaviour, and it additionally removes a latent bug: `diff_flux` and
+  `integrate_flux` reached into a private `self._flux` that the base class never
+  defines, which breaks any subclass that does not happen to set it. Far-field
+  y-units are unchanged; near-field gets `1/(erg s)` and `erg/s`.
+
+- **`Simulator.__init__` no longer accepts `duration`/`nsim`/`ntrig`.** They were
+  silently discarded (`Simulator(..., duration=1000*u.s).duration` returned `0 s`)
+  while PR 1's new docstring claimed they worked. Nothing in the repo, tests or
+  tutorials passed them — they are only ever given to `run_events`/`run_binned`,
+  which do consume them. This is a deliberate API removal, visible in the diff.
 - **Docstrings on `Simulator.run_events` and `run_binned`.** They are the main
   public teaching surface. The trivial axis property accessors stay as they are.
 
