@@ -54,9 +54,10 @@ def test_farfieldsource_cannot_be_instantiated_directly():
 
 
 def test_nearfieldsource_cannot_be_instantiated_directly():
-    # NearFieldSource fills in flux (always None) but leaves spectrum,
-    # random_photon and simulated_rate abstract, since acceptance is
-    # geometry-specific for every near-field source.
+    # NearFieldSource fills in flux (always None) and normalization (= rate)
+    # but leaves spectrum, random_photon, simulated_rate and rate abstract,
+    # since acceptance -- and the rate itself -- is geometry-specific for
+    # every near-field source.
     with pytest.raises(TypeError):
         NearFieldSource()
 
@@ -82,6 +83,10 @@ class _MinimalNearFieldSource(NearFieldSource):
         raise NotImplementedError
 
     def simulated_rate(self, detector, pose=None):
+        raise NotImplementedError
+
+    @property
+    def rate(self):
         raise NotImplementedError
 
 

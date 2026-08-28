@@ -42,6 +42,27 @@ class Source(ABC):
 
     @property
     @abstractmethod
+    def normalization(self):
+        """
+        Total (spectrum-integrated) normalization used to scale the
+        spectrum, whatever quantity that is for this source's family.
+
+        `diff_flux`, `integrate_flux`, `discretize_spectrum` and
+        `plot_spectrum` are all built on this instead of on `flux` directly,
+        so they work unchanged for both source families: `FarFieldSource`
+        returns its `flux` (`1/cm/s`) here, `NearFieldSource` returns its
+        `rate` (`1/s`).
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            The source's normalization, in whatever unit its family uses, or
+            `None` if the source has no normalization set.
+        """
+        pass
+
+    @property
+    @abstractmethod
     def spectrum(self):
         """
         The source's energy spectrum.
@@ -65,10 +86,10 @@ class Source(ABC):
         Returns
         -------
         `astropy.units.Quantity`
-            `flux * spectrum.pdf(energy)`, i.e. the flux per unit energy at
-            `energy`.
+            `normalization * spectrum.pdf(energy)`, i.e. the flux (far-field)
+            or rate (near-field) per unit energy at `energy`.
         """
-        return self._flux * self.spectrum.pdf(energy)
+        return self.normalization * self.spectrum.pdf(energy)
 
     def integrate_flux(self, lo_energy, hi_energy):
         """
@@ -83,9 +104,9 @@ class Source(ABC):
         Returns
         -------
         `astropy.units.Quantity`
-            `flux * spectrum.integrate(lo_energy, hi_energy)`.
+            `normalization * spectrum.integrate(lo_energy, hi_energy)`.
         """
-        return self._flux * self.spectrum.integrate(lo_energy, hi_energy)
+        return self.normalization * self.spectrum.integrate(lo_energy, hi_energy)
 
     def discretize_spectrum(self, axis):
         """
@@ -100,11 +121,12 @@ class Source(ABC):
         -------
         `histpy.Histogram`
             One-dimensional histogram over `axis`, with each bin holding the
-            flux integrated across that bin's energy range.
+            flux (or, for a near-field source, rate) integrated across that
+            bin's energy range.
         """
 
         binned_spec = Histogram(axis,
-                                unit = self.flux.unit,
+                                unit = self.normalization.unit,
                                 contents = self.integrate_flux(axis.lower_bounds,
                                                                axis.upper_bounds)
                                 )
@@ -127,8 +149,11 @@ class Source(ABC):
         energy_units : `astropy.units.Unit`, optional
             Units for the energy axis. Defaults to MeV.
         y_units : `astropy.units.Unit`, optional
-            Units for the flux axis. Defaults to `1/(erg cm s)` if `e2`,
-            otherwise `1/(erg cm s)` per unit energy.
+            Units for the y axis. Derived from `self.normalization`'s unit
+            when not given: for a far-field source (`flux`, `1/cm/s`) that
+            is `1/(erg cm s)` for `dN/dE`, `erg/(cm s)` for `E^2 dN/dE`; for
+            a near-field source (`rate`, `1/s`) that is `1/(erg s)` and
+            `erg/s` respectively.
         discretize_axis : `histpy.Axis`, optional
             If given, plot the spectrum binned onto this energy axis (via
             `discretize_spectrum`) instead of a smooth curve.
@@ -141,8 +166,8 @@ class Source(ABC):
             The axes the spectrum was plotted on.
         """
 
-        if self.flux is None:
-            raise RuntimeError("Set a flux before plotting the spectrum")
+        if self.normalization is None:
+            raise RuntimeError("Set a flux or rate before plotting the spectrum")
 
         if ax is None:
             fig,ax = plt.subplots()
@@ -166,7 +191,7 @@ class Source(ABC):
 
         if e2:
             if y_units is None:
-                y_units = u.Unit(u.erg/u.cm/u.s)
+                y_units = u.Unit(self.normalization.unit * u.erg)
             else:
                 y_units = u.Unit(y_units)
 
@@ -174,7 +199,7 @@ class Source(ABC):
             y_label = f'$E^2 dN/dE$ [{y_units}]'
         else:
             if y_units is None:
-                y_units = u.Unit(1/u.erg/u.cm/u.s)
+                y_units = u.Unit(self.normalization.unit / u.erg)
             else:
                 y_units = u.Unit(y_units)
 
@@ -290,6 +315,23 @@ class FarFieldSource(Source):
         """
         return self.flux
 
+    @property
+    def normalization(self):
+        """
+        Total normalization used to scale the spectrum: the flux.
+
+        This is what `Source.diff_flux`, `integrate_flux`,
+        `discretize_spectrum` and `plot_spectrum` use polymorphically; for a
+        far-field source it is simply `flux`.
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            `flux`, in `1/cm/s`, or `None` if the source has no
+            normalization set.
+        """
+        return self.flux
+
     def simulated_rate(self, detector, pose = None):
         """
         Expected rate of photons launched at the detector.
@@ -348,6 +390,43 @@ class NearFieldSource(Source):
         """
         return None
 
+    @property
+    @abstractmethod
+    def rate(self):
+        """
+        Total emission rate of the source, in `1/s`.
+
+        The near-field analogue of `FarFieldSource.flux`: the source's
+        overall normalization, integrated over its full emission angle,
+        before any geometric acceptance onto the detector's throwing plane
+        is applied (that acceptance is folded in by `simulated_rate`).
+        Implemented by concrete near-field sources, e.g. `NearPointSource`.
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            Rate in `1/s`, or `None` if the source has no normalization set.
+        """
+        pass
+
+    @property
+    def normalization(self):
+        """
+        Total normalization used to scale the spectrum: the rate.
+
+        This is what `Source.diff_flux`, `integrate_flux`,
+        `discretize_spectrum` and `plot_spectrum` use polymorphically; for a
+        near-field source it is `rate`, not `flux` (which is always `None`
+        here -- see `flux`).
+
+        Returns
+        -------
+        `astropy.units.Quantity` or None
+            `rate`, in `1/s`, or `None` if the source has no normalization
+            set.
+        """
+        return self.rate
+
 class PointSource(FarFieldSource):
     """
     A far-field source at a fixed off-axis angle in the detector frame.
@@ -384,9 +463,14 @@ class PointSource(FarFieldSource):
             Dominant chirality (+1 or -1) of the photons this source emits,
             or `None` for no chirality preference.
         chirality_degree : float
-            Fraction, in `[0, 1]`, of photons drawn with the dominant
-            `chirality`; the remainder are drawn with the opposite one.
-            Ignored if `chirality` is `None`.
+            Degree of polarization, in `[0, 1]`: 0 draws chirality with no
+            preference (50/50 between the two values), 1 always draws the
+            dominant `chirality`, and values in between interpolate --
+            the fraction of photons actually drawn with the dominant
+            `chirality` is `0.5 + chirality_degree/2`, not
+            `chirality_degree` itself. Defaults to 1 (fully polarized),
+            since a `PointSource` is normally used to model a single
+            polarized beam. Ignored if `chirality` is `None`.
         """
 
         self._spectrum = spectrum
@@ -502,9 +586,14 @@ class IsotropicSource(FarFieldSource):
             Dominant chirality (+1 or -1) of the photons this source emits,
             or `None` for no chirality preference.
         chirality_degree : float
-            Fraction, in `[0, 1]`, of photons drawn with the dominant
-            `chirality`; the remainder are drawn with the opposite one.
-            Ignored if `chirality` is `None`.
+            Degree of polarization, in `[0, 1]`: 0 draws chirality with no
+            preference (50/50 between the two values), 1 always draws the
+            dominant `chirality`, and values in between interpolate --
+            the fraction of photons actually drawn with the dominant
+            `chirality` is `0.5 + chirality_degree/2`, not
+            `chirality_degree` itself. Defaults to 0 (unpolarized), since an
+            `IsotropicSource` is normally used to model an unpolarized
+            diffuse background. Ignored if `chirality` is `None`.
         """
 
         self._spectrum = spectrum
