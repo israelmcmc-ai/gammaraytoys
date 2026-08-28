@@ -133,6 +133,10 @@ Carried forward until answered; they shape later PRs.
   that implementation, testing and orchestrator verification had all missed.
 - **Agents must commit and push as soon as work is done**, not after polishing: a rate
   limit killed one agent mid-task and lost the entire round.
+- **`git push` can fail transiently with `could not read Username`** while `git fetch`
+  keeps working -- the proxy's injected write credential drops and comes back. Six
+  consecutive attempts failed and the seventh succeeded with nothing changed. Commits
+  are not lost when this happens; re-push rather than redoing the work.
 
 ## Known environment traps for agents
 
