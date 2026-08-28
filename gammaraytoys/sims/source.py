@@ -438,7 +438,7 @@ class PointSource(FarFieldSource):
 
     def __init__(self, offaxis_angle, spectrum,
                  flux = None, flux_pivot = None, pivot_energy = None,
-                 chirality = None, chirality_degree = 1):
+                 chirality = None, chirality_degree = 0):
         """
         Parameters
         ----------
@@ -468,9 +468,10 @@ class PointSource(FarFieldSource):
             dominant `chirality`, and values in between interpolate --
             the fraction of photons actually drawn with the dominant
             `chirality` is `0.5 + chirality_degree/2`, not
-            `chirality_degree` itself. Defaults to 1 (fully polarized),
-            since a `PointSource` is normally used to model a single
-            polarized beam. Ignored if `chirality` is `None`.
+            `chirality_degree` itself. Defaults to 0 (unpolarized), so a
+            source is unpolarized unless asked otherwise. Ignored if
+            `chirality` is `None`, which is itself the default -- the
+            photon then picks its own chirality at random.
         """
 
         self._spectrum = spectrum
@@ -591,9 +592,10 @@ class IsotropicSource(FarFieldSource):
             dominant `chirality`, and values in between interpolate --
             the fraction of photons actually drawn with the dominant
             `chirality` is `0.5 + chirality_degree/2`, not
-            `chirality_degree` itself. Defaults to 0 (unpolarized), since an
-            `IsotropicSource` is normally used to model an unpolarized
-            diffuse background. Ignored if `chirality` is `None`.
+            `chirality_degree` itself. Defaults to 0 (unpolarized), so a
+            source is unpolarized unless asked otherwise. Ignored if
+            `chirality` is `None`, which is itself the default -- the
+            photon then picks its own chirality at random.
         """
 
         self._spectrum = spectrum
