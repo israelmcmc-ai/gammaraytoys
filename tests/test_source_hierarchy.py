@@ -14,11 +14,13 @@ already applies.
 """
 
 import astropy.units as u
+import numpy as np
 import pytest
 
 from gammaraytoys.sims import (Source, FarFieldSource, NearFieldSource,
                                PointSource, IsotropicSource,
-                               MonoenergeticSpectrum)
+                               MonoenergeticSpectrum, Simulator,
+                               SimpleTraditionalReconstructor)
 
 
 def test_pointsource_is_farfieldsource():
@@ -67,27 +69,35 @@ class _MinimalNearFieldSource(NearFieldSource):
     The smallest possible concrete `NearFieldSource`.
 
     PR 1 introduces `NearFieldSource` as an abstract base with no concrete
-    subclass yet -- `NearPointSource` is added in PR 4. This stand-in exists
-    only so the test below can check the inherited `flux` property on a
-    real instance, without depending on physics that PR 1 does not add.
+    subclass yet -- `NearPointSource` is added in PR 4. This stand-in fills
+    in `simulated_rate` (a fixed rate, ignoring any geometric acceptance --
+    the acceptance formulas in plan 5.4 are `NearPointSource`'s job, not
+    this base class's) and `random_photon` (delegated to an internal
+    on-axis `PointSource`, reusing its throwing-plane logic rather than
+    duplicating it) so that a real `Simulator` can mix an instance of this
+    class with far-field sources -- see
+    `test_mixed_far_and_near_field_sources_in_one_simulator` below, which is
+    the entire justification for `simulated_rate()` per plan 5.2.
     """
 
-    def __init__(self, spectrum):
+    def __init__(self, spectrum, rate=None):
         self._spectrum = spectrum
+        self._rate = rate
+        self._point_source = PointSource(offaxis_angle=0 * u.deg, spectrum=spectrum)
 
     @property
     def spectrum(self):
         return self._spectrum
 
     def random_photon(self, detector, pose=None):
-        raise NotImplementedError
+        return self._point_source.random_photon(detector=detector)
 
     def simulated_rate(self, detector, pose=None):
-        raise NotImplementedError
+        return self._rate
 
     @property
     def rate(self):
-        raise NotImplementedError
+        return self._rate
 
 
 def test_nearfieldsource_flux_is_none():
@@ -97,3 +107,48 @@ def test_nearfieldsource_flux_is_none():
     # therefore unconditionally None, for every near-field source.
     source = _MinimalNearFieldSource(MonoenergeticSpectrum(1 * u.MeV))
     assert source.flux is None
+
+
+# --- PR 1: mixing a far-field and a near-field source in one Simulator -----
+#
+# Plan section 5.2: `simulated_rate()` "is what lets the simulator mix
+# flux-normalised and rate-normalised sources in one run: it sums rates,
+# not fluxes." That is the entire reason `simulated_rate()` exists, but
+# until `_MinimalNearFieldSource` had a working `simulated_rate` (above) it
+# raised `NotImplementedError` and could never be put into a `Simulator` at
+# all, so this path had zero coverage.
+
+def test_mixed_far_and_near_field_sources_in_one_simulator(tracker):
+    far_flux = 2e-3 / u.cm / u.s
+    far_source = PointSource(offaxis_angle=0 * u.deg,
+                             spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                             flux=far_flux)
+
+    near_rate = 5.0 / u.s
+    near_source = _MinimalNearFieldSource(MonoenergeticSpectrum(2 * u.MeV), rate=near_rate)
+
+    # Computed independently of the Simulator, from the formula in plan 5.2:
+    # simulated_rate = flux * throwing_plane_size, for every far-field source.
+    far_rate = far_flux * tracker.throwing_plane_size
+
+    sim = Simulator(detector=tracker, sources=[far_source, near_source],
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    # total_flux must fall back to None as soon as any source in the mix is
+    # near-field (plan 5.1/5.2, and Simulator.total_flux's own docstring) --
+    # a single flux no longer describes a mixed run.
+    assert sim.total_flux is None
+
+    assert sim.total_rate.to_value(u.Hz) == pytest.approx((far_rate + near_rate).to_value(u.Hz))
+
+    expected_p = np.array([far_rate.to_value(u.Hz), near_rate.to_value(u.Hz)])
+    expected_p /= np.sum(expected_p)
+    np.testing.assert_allclose(sim._relative_rate, expected_p)
+
+    # The actual point of this test: run_events must complete over the mix.
+    # _MinimalNearFieldSource previously raised NotImplementedError from
+    # simulated_rate/random_photon, so a Simulator could not even be built,
+    # let alone run, with a near-field source in it.
+    events = list(sim.run_events(nsim=50))
+    assert len(events) == 50
+    assert sim.nsim == 50
