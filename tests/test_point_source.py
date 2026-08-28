@@ -4,7 +4,7 @@ import pytest
 
 from gammaraytoys.sims import (PointSource, IsotropicSource,
                                MonoenergeticSpectrum, PowerLawSpectrum,
-                               Photon)
+                               Photon, SpacecraftInterval)
 
 
 def test_pointsource_flux_from_pivot():
@@ -254,3 +254,176 @@ def test_isotropic_source_random_photon_pose_is_accepted_and_ignored(tracker):
     assert photon_with_pose.energy == photon_no_pose.energy
     assert photon_with_pose.position.x == photon_no_pose.position.x
     assert photon_with_pose.position.y == photon_no_pose.position.y
+
+
+# --- PR 3: sky_angle, occultability, and the inertial transform ------------
+#
+# Section 3.4: a far-field photon from sky angle lambda flies at
+# `direction_inertial = lambda + 180 deg`, which the detector-frame transform
+# sends to `270 deg - Nu` with `Nu = wrap180(A - lambda)`. Every expected
+# direction below is that formula evaluated by hand, never a value read back
+# out of the implementation.
+
+def _pose(attitude_deg, orbit_angle_deg = 135.0, orbit_radius_km = 6771.0):
+    """A one-second `SpacecraftInterval` at a given attitude.
+
+    `orbit_angle` defaults to 135 deg, putting nadir at 315 deg, so a source
+    at the sky angles used below is comfortably outside the Earth's disc
+    (rho = arcsin(6371/6771) = 70.2 deg) whatever the attitude.
+    """
+
+    return SpacecraftInterval(start_time = 0 * u.s,
+                              stop_time = 1 * u.s,
+                              livetime = 1 * u.s,
+                              orbit_radius = orbit_radius_km * u.km,
+                              orbit_angle = orbit_angle_deg * u.deg,
+                              attitude = attitude_deg * u.deg)
+
+
+def _wrap180(angle_deg):
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def test_pointsource_rejects_both_offaxis_angle_and_sky_angle():
+    with pytest.raises(Exception) as excinfo:
+        PointSource(offaxis_angle=10 * u.deg, sky_angle=20 * u.deg,
+                    spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    message = str(excinfo.value).lower()
+    assert 'offaxis_angle' in message and 'sky_angle' in message
+
+
+def test_pointsource_rejects_neither_offaxis_angle_nor_sky_angle():
+    with pytest.raises(Exception) as excinfo:
+        PointSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    message = str(excinfo.value).lower()
+    assert 'offaxis_angle' in message and 'sky_angle' in message
+
+
+def test_pointsource_sky_angle_requires_a_pose(tracker):
+    source = PointSource(sky_angle=45 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    with pytest.raises(Exception) as excinfo:
+        source.random_photon(tracker)
+
+    # It has to say *why*, not just blow up somewhere downstream.
+    assert 'pose' in str(excinfo.value).lower()
+
+
+@pytest.mark.parametrize("sky_angle_deg, attitude_deg", [
+    (0.0, 0.0),
+    (45.0, 90.0),
+    (90.0, 90.0),        # on-axis: Nu = 0, direction 270 deg
+    (0.0, 90.0),         # Nu = 90 deg, direction 180 deg
+    (200.0, 30.0),       # Nu = -170 deg, direction 440 -> 80 deg
+    (10.0, 400.0),       # unwrapped attitude, Nu = 30 deg
+    (33.0, 1090.0),      # three full turns past 360 deg
+    (135.0, 0.0),        # Nu = -135 deg, direction 405 -> 45 deg
+])
+def test_pointsource_sky_angle_photon_direction_follows_the_plan_transform(
+        tracker, sky_angle_deg, attitude_deg):
+    source = PointSource(sky_angle=sky_angle_deg * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    photon = source.random_photon(tracker, pose=_pose(attitude_deg))
+
+    assert photon is not None
+
+    offaxis_deg = _wrap180(attitude_deg - sky_angle_deg)
+    expected_direction = (270.0 - offaxis_deg) % 360.0
+
+    assert _wrap180(photon.direction.to_value(u.deg) - expected_direction) == pytest.approx(
+        0.0, abs=1e-8)
+
+
+def test_pointsource_sky_angle_photon_direction_is_wrapped_into_zero_to_360(tracker):
+    # `Nu = wrap180(A - lambda)` can be negative, and `270 - Nu` then exceeds
+    # 360 deg. The detector's `simulate_event` decides which way a photon
+    # flies with a bare `direction < 180 deg` test, so an unwrapped 405 deg
+    # would be walked downwards when it is really flying up at 45 deg.
+    source = PointSource(sky_angle=135 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    for _ in range(10):
+        photon = source.random_photon(tracker, pose=_pose(0.0))
+
+        direction = photon.direction.to_value(u.deg)
+
+        assert 0.0 <= direction < 360.0
+        assert direction == pytest.approx(45.0, abs=1e-8)
+
+
+def test_pointsource_sky_angle_photon_starts_on_the_plane_for_its_offaxis_angle(tracker):
+    # Position and direction must stay consistent: the photon has to be
+    # launched from the throwing plane belonging to the *transformed*
+    # off-axis angle, not to some stale one.
+    sky_angle_deg = 200.0
+    attitude_deg = 30.0
+    offaxis = _wrap180(attitude_deg - sky_angle_deg) * u.deg
+
+    source = PointSource(sky_angle=sky_angle_deg * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    radius = tracker.surrounding_circle_radius.to_value(u.cm)
+
+    for _ in range(20):
+        photon = source.random_photon(tracker, pose=_pose(attitude_deg))
+
+        assert _radial_offset(tracker, photon.position, offaxis).to_value(u.cm) == pytest.approx(
+            radius)
+
+
+def test_pointsource_sky_angle_tracks_a_changing_attitude(tracker):
+    # The same source, seen from three attitudes 90 deg apart, must produce
+    # three directions 90 deg apart -- the sky is fixed, the spacecraft turns.
+    source = PointSource(sky_angle=17 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    directions = [source.random_photon(tracker, pose=_pose(a)).direction.to_value(u.deg)
+                  for a in (0.0, 90.0, 180.0, 270.0)]
+
+    for i in range(1, len(directions)):
+        # direction_det = 270 - (A - lambda), so it *decreases* by 90 deg
+        # each time the attitude increases by 90 deg.
+        step = _wrap180(directions[i] - directions[i - 1])
+        assert step == pytest.approx(-90.0, abs=1e-8)
+
+
+def test_pointsource_offaxis_angle_is_unaffected_by_a_real_pose(tracker):
+    # Trap 2 in Section 8: `pose = None` must mean exactly today's behaviour,
+    # and an `offaxis_angle`-specified source must ignore a pose entirely.
+    source = PointSource(offaxis_angle=30 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    np.random.seed(2024)
+    without = source.random_photon(tracker)
+
+    np.random.seed(2024)
+    with_pose = source.random_photon(tracker, pose=_pose(123.0))
+
+    assert with_pose is not None
+    assert with_pose.direction == without.direction
+    assert with_pose.energy == without.energy
+    assert with_pose.position.x == without.position.x
+    assert with_pose.position.y == without.position.y
+
+    # And the direction is still the plain detector-frame convention.
+    assert without.direction.to_value(u.deg) == pytest.approx(240.0)
+
+
+def test_farfield_sources_are_occultable_by_default():
+    # Section 8.1 / the PR 3 contract: `FarFieldSource.occultable` defaults
+    # to True; only `EarthAlbedoSource` (PR 5) turns it off.
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+
+    assert PointSource(offaxis_angle=0 * u.deg, spectrum=spec).occultable is True
+    assert PointSource(sky_angle=0 * u.deg, spectrum=spec).occultable is True
+    assert IsotropicSource(spectrum=spec).occultable is True
