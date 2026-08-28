@@ -29,8 +29,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 
 | PR | Scope | Branch | State |
 |---|---|---|---|
-| 1 | Source hierarchy + `simulated_rate()` | `claude/cosimita-pr1-source-hierarchy` | In review |
-| 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | In review |
+| 1 | Source hierarchy + `simulated_rate()` | `claude/cosimita-pr1-source-hierarchy` | **PR #13 open** — awaiting maintainer |
+| 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | **PR #14 open** — awaiting maintainer |
 | 3 | `InertialSimulator`, transforms, occultation | — | Not started |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
 | 5 | `EarthAlbedoSource` | — | Not started |
@@ -92,6 +92,47 @@ Carried forward until answered; they shape later PRs.
    plan's literal signature. Forced by the plan's own validation rule
    `orbit_radius > earth.radius`. Either the reader knows about the Earth, or that
    validation moves elsewhere.
+
+## Carried into PR 3
+
+- **`is_occulted` costs 140 us/call** vs 0.5 us for the plain-float equivalent (277x),
+  because it does Quantity arithmetic per photon and recomputes `arcsin(R_E/r)` every
+  call although it is constant per interval. That is 22% of `random_photon` -- inside
+  the plan's 50% budget, but exactly the pattern SS3.5 warns about. Hoist `nadir` and
+  `rho` to floats once per interval and unit-test the fast path against `is_occulted`
+  so the two cannot drift.
+- **`attitude` and `orbit_angle` are unwrapped past 360 deg** (matching the plan's own
+  SS4.1 example). PR 3's `Nu = A - lambda` owns the wrapping; PR 2 does none.
+- **`FarFieldSource` has no `occultable` property yet** (trap 1 requires it, `False` on
+  the albedo). Deliberately left out of PR 1; PR 3 or PR 5 adds it.
+- **`PointSource.__init__` takes `offaxis_angle` as a required first positional.** PR 3
+  must add `sky_angle` and make them mutually exclusive. Every call site in `docs/` and
+  `tests/` uses the keyword form, so positional compatibility is not load-bearing.
+- **SS5.3 commits occultation to the *source*** (`random_photon` returns `Photon | None`),
+  not to the simulator recovering lambda from `photon.direction`. PR 3 must not drift to
+  the latter.
+- **`simulated_rate()` returns `None` for an unnormalized source**, which would surface
+  in PR 3 as a `TypeError` deep inside `mu = rate * livetime * scaling`.
+  `InertialSimulator.__init__` should validate and raise naming the offender.
+- **`Earth` is not carried on `SpacecraftHistory`'s public API for PR 3's use** beyond
+  the new read-only property -- PR 3 and PR 7's YAML loader must use that property
+  rather than constructing their own, or the validated and simulated Earths can differ.
+- **The per-photon body of `Simulator.run_events` is inlined**, so `InertialSimulator`
+  will duplicate `random_photon -> simulate_event -> reconstruct`. Extracting a shared
+  `_simulate_one(source, pose)` helper would avoid that.
+
+## Lessons for later PRs
+
+- **Mutation-test the tests, not just the code.** Both the first test round and the
+  orchestrator's own mutation check passed PR 1 while the two behaviours it actually
+  changed -- rate-weighted source selection and the `duration` accumulator -- could be
+  deleted outright with the whole suite still green. Passing a mutation check only
+  proves the suite catches the mutations you happened to pick. Test authors must inject
+  the specific bug their test targets and show it fails.
+- **The reviewer slot earns its cost.** Review found real defects in both wave-1 PRs
+  that implementation, testing and orchestrator verification had all missed.
+- **Agents must commit and push as soon as work is done**, not after polishing: a rate
+  limit killed one agent mid-task and lost the entire round.
 
 ## Known environment traps for agents
 
