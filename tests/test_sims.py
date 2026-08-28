@@ -34,16 +34,14 @@ def test_nsources_multiple_sources(tracker, source):
                     reconstructor=SimpleTraditionalReconstructor())
 
     assert sim.nsources == 2
-    assert sim.total_flux.to_value(source.flux.unit) == pytest.approx(
-        (source.flux + source2.flux).to_value(source.flux.unit))
 
 
-def test_standarize_termination_requires_exactly_one_condition(simulator):
+def test_standardize_termination_requires_exactly_one_condition(simulator):
     with pytest.raises(ValueError):
-        simulator._standarize_termination()
+        simulator._standardize_termination()
 
     with pytest.raises(ValueError):
-        simulator._standarize_termination(nsim=10, ntrig=5)
+        simulator._standardize_termination(nsim=10, ntrig=5)
 
 
 def test_run_events_by_nsim_count(simulator):
@@ -93,15 +91,15 @@ def test_measured_energy_axis_setter_preserves_scale(simulator):
 #
 # Plan section 5.2: Simulator used to compute
 #     nsim = round(total_flux * duration * throwing_plane_size)
-# and now computes nsim = round(total_rate * duration), with
-# total_rate = simulated_rate() summed over sources, which for a far-field
-# source is flux * throwing_plane_size. For a far-field-only run the two
-# must be numerically identical. We compute the "old formula" side directly
-# from the flux/duration inputs and detector.throwing_plane_size (never by
-# calling the Simulator and reading its own output back), then compare it to
-# what `_standarize_termination` -- the new rate-based path -- actually
-# produces. `_standarize_termination` is O(1) regardless of how large nsim
-# comes out, so a huge nsim costs nothing to check.
+# and now computes nsim = round(total_simulated_rate * duration), with
+# total_simulated_rate = simulated_rate() summed over sources, which for a
+# far-field source is flux * throwing_plane_size. For a far-field-only run
+# the two must be numerically identical. We compute the "old formula" side
+# directly from the flux/duration inputs and detector.throwing_plane_size
+# (never by calling the Simulator and reading its own output back), then
+# compare it to what `_standardize_termination` -- the new rate-based path --
+# actually produces. `_standardize_termination` is O(1) regardless of how
+# large nsim comes out, so a huge nsim costs nothing to check.
 
 @pytest.mark.parametrize("flux_per_cm_s, duration_s", [
     (1e-9, 0.137),    # tiny flux, sub-second duration -> nsim == 0
@@ -128,7 +126,7 @@ def test_nsim_from_duration_matches_old_flux_formula(tracker, flux_per_cm_s, dur
 
     old_formula_nsim = round((flux * duration * tracker.throwing_plane_size).to_value(''))
 
-    nsim, _, _ = sim._standarize_termination(duration=duration)
+    nsim, _, _ = sim._standardize_termination(duration=duration)
 
     assert nsim == old_formula_nsim
 
@@ -150,7 +148,7 @@ def test_nsim_from_duration_matches_old_flux_formula_multi_source(tracker):
 
     old_formula_nsim = round(((flux1 + flux2) * duration * tracker.throwing_plane_size).to_value(''))
 
-    nsim, _, _ = sim._standarize_termination(duration=duration)
+    nsim, _, _ = sim._standardize_termination(duration=duration)
 
     assert nsim == old_formula_nsim
 
@@ -162,7 +160,7 @@ def test_nsim_from_duration_matches_old_flux_formula_multi_source(tracker):
     (5.0, 5_000_000),    # top of the requested flux range, huge nsim
 ], ids=["tiny-flux", "small-flux", "large-nsim", "huge-flux-and-nsim"])
 def test_duration_from_nsim_matches_old_flux_formula(tracker, flux_per_cm_s, nsim):
-    # Inverse direction: given nsim, Simulator._standarize_termination must
+    # Inverse direction: given nsim, Simulator._standardize_termination must
     # recover duration = nsim / (flux * throwing_plane_size), i.e. the exact
     # algebraic inverse of the formula checked above.
     flux = flux_per_cm_s / u.cm / u.s
@@ -175,7 +173,7 @@ def test_duration_from_nsim_matches_old_flux_formula(tracker, flux_per_cm_s, nsi
 
     expected_duration = (nsim / (flux * tracker.throwing_plane_size)).to(u.s)
 
-    _, _, duration = sim._standarize_termination(nsim=nsim)
+    _, _, duration = sim._standardize_termination(nsim=nsim)
 
     assert duration.to_value(u.s) == pytest.approx(expected_duration.to_value(u.s), rel=1e-12)
 
@@ -221,28 +219,18 @@ def test_multi_source_selection_weights_match_rate_ratios(tracker):
         f"empirical={empirical}, expected={expected_p}, 5-sigma={5 * sigma}")
 
 
-# --- PR 1: total_flux still works, and is None when a source has no flux ---
+# --- PR 1: total_simulated_rate is None when a source has no flux ---------
 
-def test_total_flux_far_field_only_run(tracker, source):
-    # Baseline: a single far-field source with a flux set.
-    sim = Simulator(detector=tracker, sources=source,
-                    reconstructor=SimpleTraditionalReconstructor())
-
-    assert sim.total_flux.to_value(source.flux.unit) == pytest.approx(
-        source.flux.to_value(source.flux.unit))
-
-
-def test_total_flux_none_when_source_has_no_flux(tracker):
+def test_total_simulated_rate_none_when_source_has_no_flux(tracker):
     # PointSource with neither `flux` nor `flux_pivot`/`pivot_energy` given
-    # is unnormalized: flux is None, so is simulated_rate(), and so must be
-    # total_flux and total_rate.
+    # is unnormalized: flux() is None, so is simulated_rate(), and so must
+    # be total_simulated_rate.
     source = PointSource(offaxis_angle=0 * u.deg, spectrum=MonoenergeticSpectrum(1 * u.MeV))
 
     sim = Simulator(detector=tracker, sources=source,
                     reconstructor=SimpleTraditionalReconstructor())
 
-    assert sim.total_flux is None
-    assert sim.total_rate is None
+    assert sim.total_simulated_rate is None
 
 
 # --- PR 1: run_events() must actually consult the rate weights -------------
@@ -292,7 +280,7 @@ def test_run_events_selects_sources_in_proportion_to_rate(tracker):
 #
 # No existing test calls `run_events(duration=...)` at all -- the duration
 # path is only reached indirectly, through the private
-# `_standarize_termination`. `sim.duration` is printed in tutorials 02 and
+# `_standardize_termination`. `sim.duration` is printed in tutorials 02 and
 # 03, so it is user-visible output with zero end-to-end coverage. This test
 # runs a real `duration`-terminated simulation on one normalized far-field
 # source and checks both the resulting `nsim` (independently, from the old
@@ -317,17 +305,17 @@ def test_run_events_by_duration_sets_nsim_and_duration(tracker):
     assert sim.nsim == expected_nsim
 
     # sim.duration is derived from the launched-photon count and the total
-    # rate (nsim / total_rate), not measured -- so it will not equal the
-    # requested `duration` exactly (nsim was rounded to an integer), but it
-    # must be very close: the rounding error is at most 0.5 photon out of
-    # ~200, i.e. well under 1%. Halving the accumulator (the proven mutant)
-    # is off by 50%, far outside this tolerance.
+    # simulated rate (nsim / total_simulated_rate), not measured -- so it
+    # will not equal the requested `duration` exactly (nsim was rounded to
+    # an integer), but it must be very close: the rounding error is at most
+    # 0.5 photon out of ~200, i.e. well under 1%. Halving the accumulator
+    # (the proven mutant) is off by 50%, far outside this tolerance.
     assert sim.duration.to_value(u.s) == pytest.approx(duration.to_value(u.s), rel=1e-2)
 
     # Exact, independent recomputation of the accumulation formula itself
-    # (nsim / total_rate), using only sim.nsim and quantities computed
-    # outside the simulator -- pins the mutant down precisely rather than
-    # relying on the rounding-tolerant check above.
-    total_rate = flux * tracker.throwing_plane_size
-    expected_duration = (sim.nsim / total_rate).to(u.s)
+    # (nsim / total_simulated_rate), using only sim.nsim and quantities
+    # computed outside the simulator -- pins the mutant down precisely
+    # rather than relying on the rounding-tolerant check above.
+    total_simulated_rate = flux * tracker.throwing_plane_size
+    expected_duration = (sim.nsim / total_simulated_rate).to(u.s)
     assert sim.duration.to_value(u.s) == pytest.approx(expected_duration.to_value(u.s), rel=1e-9)

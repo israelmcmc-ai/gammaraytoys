@@ -27,7 +27,7 @@ def test_pointsource_flux_none_without_normalization():
 
     source = PointSource(offaxis_angle=0 * u.deg, spectrum=spec)
 
-    assert source.flux is None
+    assert source.flux() is None
 
 
 def test_pointsource_integrate_flux_matches_spectrum_integral():
@@ -165,9 +165,9 @@ def test_isotropic_directions_cover_the_full_circle(tracker):
 # --- PR 1: simulated_rate() and the pose = None seam ------------------------
 #
 # Plan section 5.2: for every far-field source,
-#     simulated_rate = sky_integrated_flux(pose) * detector.throwing_plane_size
-# and sky_integrated_flux() defaults to plain `flux`, unchanged by pose, for
-# every far-field source except the (later) Earth-albedo one. We compute the
+#     simulated_rate = flux(pose) * detector.throwing_plane_size
+# and flux() defaults to plain `self._flux`, unchanged by pose, for every
+# far-field source except the (later) Earth-albedo one. We compute the
 # expected rate here from the source's own flux and the detector's own
 # throwing_plane_size -- the same two ingredients the formula names -- never
 # by calling simulated_rate() itself and checking it against its own output.

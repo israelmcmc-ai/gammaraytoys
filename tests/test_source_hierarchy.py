@@ -40,26 +40,27 @@ def test_nearfieldsource_is_source():
 
 
 def test_source_cannot_be_instantiated_directly():
-    # Source declares flux/spectrum/random_photon/simulated_rate as
+    # Source declares normalization/spectrum/random_photon/simulated_rate as
     # abstractmethod: it is a pure interface, never a concrete source.
     with pytest.raises(TypeError):
         Source()
 
 
 def test_farfieldsource_cannot_be_instantiated_directly():
-    # FarFieldSource fills in simulated_rate() (the one formula shared by
-    # every far-field geometry) but still leaves spectrum, flux and
-    # random_photon abstract -- there is no way to draw a photon from a
-    # bare FarFieldSource, only from a concrete geometry like PointSource.
+    # FarFieldSource fills in flux(), normalization and simulated_rate()
+    # (the formulas shared by every far-field geometry) but still leaves
+    # spectrum and random_photon abstract -- there is no way to draw a
+    # photon from a bare FarFieldSource, only from a concrete geometry like
+    # PointSource.
     with pytest.raises(TypeError):
         FarFieldSource()
 
 
 def test_nearfieldsource_cannot_be_instantiated_directly():
-    # NearFieldSource fills in flux (always None) and normalization (= rate)
-    # but leaves spectrum, random_photon, simulated_rate and rate abstract,
-    # since acceptance -- and the rate itself -- is geometry-specific for
-    # every near-field source.
+    # NearFieldSource fills in normalization (= rate) but leaves spectrum,
+    # random_photon, simulated_rate and rate abstract, since acceptance --
+    # and the rate itself -- is geometry-specific for every near-field
+    # source.
     with pytest.raises(TypeError):
         NearFieldSource()
 
@@ -100,15 +101,6 @@ class _MinimalNearFieldSource(NearFieldSource):
         return self._rate
 
 
-def test_nearfieldsource_flux_is_none():
-    # Plan section 5.1: a NearFieldSource is normalized by a rate (1/s),
-    # not a flux (1/cm/s) -- a brightness per unit sky length is not
-    # meaningful for a source close enough that distance matters. flux is
-    # therefore unconditionally None, for every near-field source.
-    source = _MinimalNearFieldSource(MonoenergeticSpectrum(1 * u.MeV))
-    assert source.flux is None
-
-
 # --- PR 1: mixing a far-field and a near-field source in one Simulator -----
 #
 # Plan section 5.2: `simulated_rate()` "is what lets the simulator mix
@@ -134,12 +126,8 @@ def test_mixed_far_and_near_field_sources_in_one_simulator(tracker):
     sim = Simulator(detector=tracker, sources=[far_source, near_source],
                     reconstructor=SimpleTraditionalReconstructor())
 
-    # total_flux must fall back to None as soon as any source in the mix is
-    # near-field (plan 5.1/5.2, and Simulator.total_flux's own docstring) --
-    # a single flux no longer describes a mixed run.
-    assert sim.total_flux is None
-
-    assert sim.total_rate.to_value(u.Hz) == pytest.approx((far_rate + near_rate).to_value(u.Hz))
+    assert sim.total_simulated_rate.to_value(u.Hz) == pytest.approx(
+        (far_rate + near_rate).to_value(u.Hz))
 
     expected_p = np.array([far_rate.to_value(u.Hz), near_rate.to_value(u.Hz)])
     expected_p /= np.sum(expected_p)

@@ -14,31 +14,17 @@ class Source(ABC):
 
     Holds the pieces that are common to every source regardless of how it is
     normalized or where it sits: the energy spectrum, the total normalization
-    used to scale it (`flux`), and the helpers that plot or discretize the
-    spectrum. Concrete geometry -- where the source is and how photons are
-    drawn from it -- lives in the two abstract subclasses below it:
+    used to scale it (`normalization`), and the helpers that plot or
+    discretize the spectrum. Concrete geometry -- where the source is and how
+    photons are drawn from it -- lives in the two abstract subclasses below
+    it:
 
     - `FarFieldSource`: normalized by a flux, in `1/cm/s` (a source at
-      infinite distance, e.g. a point on the sky).
+      infinite distance, e.g. a point on the sky). Exposes that flux through
+      `flux(pose)`.
     - `NearFieldSource`: normalized by a rate, in `1/s` (a source at a fixed
-      position near the detector).
+      position near the detector). Exposes that rate through `rate`.
     """
-
-    @property
-    @abstractmethod
-    def flux(self):
-        """
-        Total (spectrum-integrated) normalization of the source.
-
-        Returns
-        -------
-        `astropy.units.Quantity` or None
-            Flux in `1/cm/s` for a far-field source, or `None` if either the
-            source has no normalization set, or the source is a near-field
-            source (whose normalization is a rate, not a flux -- see
-            `NearFieldSource`).
-        """
-        pass
 
     @property
     @abstractmethod
@@ -288,19 +274,20 @@ class FarFieldSource(Source):
     already use `flux` to mean the flux **integrated over the whole sky**,
     not a per-unit-angle brightness -- every far-field source must match
     that convention, since it is what makes `simulated_rate()` a plain
-    product with the detector's `throwing_plane_size` (see `sky_integrated_flux`).
+    product with the detector's `throwing_plane_size` (see `flux`).
     """
 
-    def sky_integrated_flux(self, pose = None):
+    def flux(self, pose = None):
         """
         Flux integrated over the whole sky, in `1/cm/s`.
 
-        The default implementation simply returns `flux` and ignores `pose`
-        -- true for every far-field source in this codebase except the
-        (future) Earth-albedo source, whose apparent flux depends on the
+        The default implementation simply returns `self._flux` and ignores
+        `pose` -- true for every far-field source in this codebase except
+        the (future) Earth-albedo source, whose apparent flux depends on the
         spacecraft's orbital radius. Subclasses that need pose-dependence
-        override this method; `flux` and `simulated_rate()` then follow
-        automatically.
+        override this method; `normalization` and `simulated_rate()` then
+        follow automatically. Concrete subclasses set `self._flux` in their
+        constructor via the `flux` keyword.
 
         Parameters
         ----------
@@ -313,7 +300,7 @@ class FarFieldSource(Source):
             Flux in `1/cm/s`, or `None` if the source has no normalization
             set.
         """
-        return self.flux
+        return self._flux
 
     @property
     def normalization(self):
@@ -322,15 +309,16 @@ class FarFieldSource(Source):
 
         This is what `Source.diff_flux`, `integrate_flux`,
         `discretize_spectrum` and `plot_spectrum` use polymorphically; for a
-        far-field source it is simply `flux`.
+        far-field source it is simply `flux()` (evaluated with no pose, i.e.
+        the pure detector-frame flux).
 
         Returns
         -------
         `astropy.units.Quantity` or None
-            `flux`, in `1/cm/s`, or `None` if the source has no
+            `flux()`, in `1/cm/s`, or `None` if the source has no
             normalization set.
         """
-        return self.flux
+        return self.flux()
 
     def simulated_rate(self, detector, pose = None):
         """
@@ -338,7 +326,7 @@ class FarFieldSource(Source):
 
         For every far-field source this is uniformly the sky-integrated
         flux times the detector's throwing-plane size:
-        `sky_integrated_flux(pose) * detector.throwing_plane_size`.
+        `flux(pose) * detector.throwing_plane_size`.
 
         Parameters
         ----------
@@ -346,15 +334,15 @@ class FarFieldSource(Source):
             The detector the photons are thrown at. `throwing_plane_size` is
             `2a`, where `a` is the surrounding-circle radius.
         pose : `SpacecraftInterval` or None
-            Spacecraft pose, forwarded to `sky_integrated_flux`. `None`
-            means pure detector-frame mode.
+            Spacecraft pose, forwarded to `flux`. `None` means pure
+            detector-frame mode.
 
         Returns
         -------
         `astropy.units.Quantity`
             Rate in `1/s`, or `None` if the source has no normalization set.
         """
-        flux = self.sky_integrated_flux(pose)
+        flux = self.flux(pose)
 
         if flux is None:
             return None
@@ -369,26 +357,15 @@ class NearFieldSource(Source):
 
     Normalized by a total emission rate in `1/s` rather than a flux: "flux"
     -- a brightness per unit length of sky -- is not a meaningful quantity
-    for a source close enough that its distance to the detector matters.
-    `flux` is therefore always `None` for a near-field source;
-    `Simulator.total_flux` uses that to report `None` whenever a near-field
-    source is mixed into a run, since a single flux no longer describes it.
+    for a source close enough that its distance to the detector matters. A
+    near-field source therefore has no `flux` at all (that method only
+    exists on `FarFieldSource`); its normalization is `rate` instead.
 
     Unlike `FarFieldSource`, there is no shared formula for `simulated_rate()`
     across near-field geometries -- each source's acceptance depends on its
     own position relative to the detector -- so it stays abstract here and is
     implemented by each concrete subclass.
     """
-
-    @property
-    def flux(self):
-        """
-        Always `None`.
-
-        A near-field source is normalized by a rate (`1/s`), not a flux
-        (`1/cm/s`) -- see the class docstring.
-        """
-        return None
 
     @property
     @abstractmethod
@@ -416,8 +393,8 @@ class NearFieldSource(Source):
 
         This is what `Source.diff_flux`, `integrate_flux`,
         `discretize_spectrum` and `plot_spectrum` use polymorphically; for a
-        near-field source it is `rate`, not `flux` (which is always `None`
-        here -- see `flux`).
+        near-field source it is `rate` (there is no `flux` to fall back on
+        -- see the class docstring).
 
         Returns
         -------
@@ -496,11 +473,6 @@ class PointSource(FarFieldSource):
         self._cached_offaxis_angle = None
         self._plane_origin = None
         self._throw_parallel = None
-
-    @property
-    def flux(self):
-        """Total flux integrated over the whole sky, in `1/cm/s`, or `None`."""
-        return self._flux
 
     @property
     def spectrum(self):
@@ -609,11 +581,6 @@ class IsotropicSource(FarFieldSource):
                                          spectrum = spectrum,
                                          chirality = chirality,
                                          chirality_degree = chirality_degree)
-
-    @property
-    def flux(self):
-        """Total flux integrated over the whole sky, in `1/cm/s`, or `None`."""
-        return self._flux
 
     @property
     def spectrum(self):

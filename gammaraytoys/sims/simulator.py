@@ -1,7 +1,7 @@
 from histpy import Histogram, Axes, Axis
 from astropy import units as u
 import numpy as np
-from .source import Source, FarFieldSource
+from .source import Source
 from tqdm import tqdm
 
 class Simulator:
@@ -39,7 +39,7 @@ class Simulator:
 
         if isinstance(sources, Source):
             self.sources = [sources]
-            self.total_rate = sources.simulated_rate(self.detector)
+            self.total_simulated_rate = sources.simulated_rate(self.detector)
             self._relative_rate = [1]
         else:
             # Multiple sources
@@ -47,8 +47,8 @@ class Simulator:
 
             rates = u.Quantity([s.simulated_rate(self.detector) for s in self.sources])
 
-            self.total_rate = np.sum(rates)
-            self._relative_rate = (rates/self.total_rate).to_value('')
+            self.total_simulated_rate = np.sum(rates)
+            self._relative_rate = (rates/self.total_simulated_rate).to_value('')
 
         self.reconstructor = reconstructor
 
@@ -71,7 +71,7 @@ class Simulator:
         # Other
         self.doppler_broadening = doppler_broadening
 
-    def _standarize_termination(self, nsim = None, ntrig = None, duration = None):
+    def _standardize_termination(self, nsim = None, ntrig = None, duration = None):
         """
         Convert whichever single finishing condition was given
         (`nsim`/`ntrig`/`duration`) into the full triple, filling the other
@@ -94,7 +94,7 @@ class Simulator:
             was not the driving condition comes back as `np.inf`
             (unbounded) -- a plain, unitless float, even for `duration`.
             `nsim` (or `duration`) comes back `None` instead of a number if
-            `self.total_rate` is `None` (some source has no normalization
+            `self.total_simulated_rate` is `None` (some source has no normalization
             set), since it cannot be computed in that case. Otherwise
             `duration` is an `astropy.units.Quantity` in time units (the
             given, or rate-derived, live time) and `nsim`/`ntrig` are `int`
@@ -107,16 +107,16 @@ class Simulator:
             raise ValueError("Specify one and only one finishing condition")
 
         if duration is not None:
-            if self.total_rate is not None:
-                nsim = int(np.round((self.total_rate*duration).to_value('')))
+            if self.total_simulated_rate is not None:
+                nsim = int(np.round((self.total_simulated_rate*duration).to_value('')))
             else:
                 nsim = None
             # TBD after sims
             ntrig = np.inf
 
         elif nsim is not None:
-            if self.total_rate is not None:
-                duration = nsim/self.total_rate
+            if self.total_simulated_rate is not None:
+                duration = nsim/self.total_simulated_rate
             else:
                 duration = None
             # TBD after sims
@@ -131,26 +131,6 @@ class Simulator:
             raise RuntimeError("This should not happen")
 
         return nsim, ntrig, duration
-
-    @property
-    def total_flux(self):
-        """
-        Total flux (`1/cm/s`) summed over the simulator's far-field sources.
-
-        Kept for backward compatibility with detector-frame-only runs, where
-        every source is far-field and this reduces to "total sky-integrated
-        flux". Returns `None` if any source in the run is a near-field
-        source (whose normalization is a rate, not a flux) or has an unset
-        (`None`) flux -- in which case use `total_rate` instead.
-        """
-
-        fluxes = []
-        for source in self.sources:
-            if not isinstance(source, FarFieldSource) or source.flux is None:
-                return None
-            fluxes.append(source.flux)
-
-        return np.sum(u.Quantity(fluxes))
 
     @property
     def nsources(self):
@@ -342,11 +322,11 @@ class Simulator:
 
         Exactly one of `nsim`, `ntrig`, `duration` must be given; it sets the
         finishing condition. Under the hood a `duration` is converted to a
-        target `nsim` up front -- `nsim = round(total_rate * duration)`,
-        via `self.total_rate` -- rather than tracked as elapsed simulated
+        target `nsim` up front -- `nsim = round(total_simulated_rate * duration)`,
+        via `self.total_simulated_rate` -- rather than tracked as elapsed simulated
         time while the loop runs: the run always finishes on a launched- or
         triggered-photon count, never on a live-time check mid-run. This
-        matters if `total_rate` changes between calls (e.g. the source list
+        matters if `total_simulated_rate` changes between calls (e.g. the source list
         is edited): a `duration` given here is translated to a photon count
         using the rate *at call time*, not re-evaluated as photons are
         thrown.
@@ -367,8 +347,8 @@ class Simulator:
 
         After the run, `self.nsim`, `self.ntrig` and `self.duration` are
         incremented by this run's totals (`self.duration` again derived
-        from the launched-photon count and `self.total_rate`, not measured
-        -- `None` if `self.total_rate` is `None`).
+        from the launched-photon count and `self.total_simulated_rate`, not measured
+        -- `None` if `self.total_simulated_rate` is `None`).
 
         Parameters
         ----------
@@ -378,7 +358,7 @@ class Simulator:
             Stop after recording this many triggers.
         duration : `astropy.units.Quantity`, optional
             Stop after launching the number of photons expected in this
-            much simulated live time, given `self.total_rate` (time units).
+            much simulated live time, given `self.total_simulated_rate` (time units).
 
         Yields
         ------
@@ -389,7 +369,7 @@ class Simulator:
             `self.reconstructor`. Check `reco_event.triggered`.
         """
 
-        nsim_target, ntrig_target, duration_target = self._standarize_termination(nsim, ntrig, duration)
+        nsim_target, ntrig_target, duration_target = self._standardize_termination(nsim, ntrig, duration)
         
         nsim = 0
         ntrig = 0
@@ -403,8 +383,8 @@ class Simulator:
                 if terminate:
                     self.nsim += nsim
                     self.ntrig += ntrig
-                    if self.total_rate is not None:
-                        self.duration += (nsim/self.total_rate).to(u.s)
+                    if self.total_simulated_rate is not None:
+                        self.duration += (nsim/self.total_simulated_rate).to(u.s)
                     else:
                         self.duration = None
 

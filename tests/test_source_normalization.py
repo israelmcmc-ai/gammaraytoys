@@ -28,16 +28,15 @@ class _FarFieldFluxStub(FarFieldSource):
     Minimal concrete `FarFieldSource` that deliberately never sets a
     `_flux` attribute (its value lives under a differently-named attribute
     instead), to prove `diff_flux`/`integrate_flux` route through the
-    `normalization` property (-> `flux`) rather than a private `_flux` name
-    that a concrete subclass might not define.
+    `normalization` property (-> `flux()`) rather than a private `_flux`
+    name that a concrete subclass might not define.
     """
 
     def __init__(self, spectrum, flux):
         self._spectrum = spectrum
         self._flux_value = flux
 
-    @property
-    def flux(self):
+    def flux(self, pose=None):
         return self._flux_value
 
     @property
@@ -122,7 +121,7 @@ def test_farfieldsource_normalization_is_flux():
     flux = 3e-4 / u.cm / u.s
     source = PointSource(offaxis_angle=0 * u.deg, spectrum=spec, flux=flux)
 
-    assert source.normalization is source.flux
+    assert source.normalization is source.flux()
 
 
 # --- far-field: plot_spectrum default y-units -----------------------------
