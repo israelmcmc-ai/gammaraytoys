@@ -6,3 +6,6 @@ dist/
 docs/_build/
 gammaraytoys.egg-info/
 *.DS_Store
+
+# Transient git worktrees created by Claude Code agents
+.claude/worktrees/
