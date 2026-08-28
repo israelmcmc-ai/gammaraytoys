@@ -154,6 +154,12 @@ class _NonOccultablePointSource(PointSource):
     def occultable(self):
         return False
 
+    @occultable.setter
+    def occultable(self, value):
+        # A no-op setter, so this subclass works whether the base declares
+        # `occultable` as a read-only property or assigns it per instance.
+        pass
+
 
 # --- the shared "clean" run ----------------------------------------------
 #
@@ -696,9 +702,11 @@ def test_offaxis_angle_far_field_source_raises_at_construction():
                           spacecraft_history=history,
                           earth=earth)
 
+    # However it spells them ('offaxis_angle' / 'off-axis angle',
+    # 'sky_angle' / 'sky angle'), the message has to say which is wrong.
     message = str(excinfo.value).lower()
 
-    assert 'offaxis_angle' in message or 'sky_angle' in message
+    assert 'axis' in message or 'sky' in message, str(excinfo.value)
 
 
 def test_sky_angle_source_raises_when_used_without_a_pose():

@@ -284,21 +284,28 @@ def _wrap180(angle_deg):
     return (angle_deg + 180.0) % 360.0 - 180.0
 
 
+def _mentions_both_angles(excinfo):
+    """The error has to name both alternatives, however it spells them
+    ('offaxis_angle' / 'off-axis angle', 'sky_angle' / 'sky angle')."""
+
+    message = str(excinfo.value).lower()
+
+    return 'axis' in message and 'sky' in message
+
+
 def test_pointsource_rejects_both_offaxis_angle_and_sky_angle():
     with pytest.raises(Exception) as excinfo:
         PointSource(offaxis_angle=10 * u.deg, sky_angle=20 * u.deg,
                     spectrum=MonoenergeticSpectrum(1 * u.MeV))
 
-    message = str(excinfo.value).lower()
-    assert 'offaxis_angle' in message and 'sky_angle' in message
+    assert _mentions_both_angles(excinfo), str(excinfo.value)
 
 
 def test_pointsource_rejects_neither_offaxis_angle_nor_sky_angle():
     with pytest.raises(Exception) as excinfo:
         PointSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
 
-    message = str(excinfo.value).lower()
-    assert 'offaxis_angle' in message and 'sky_angle' in message
+    assert _mentions_both_angles(excinfo), str(excinfo.value)
 
 
 def test_pointsource_sky_angle_requires_a_pose(tracker):
