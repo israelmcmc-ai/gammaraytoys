@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 from astropy import units as u
 import numpy as np
 from tqdm import tqdm
@@ -62,8 +60,9 @@ class InertialSimulator(SimulatorBase):
             terminator row.
         earth : `Earth`
             The Earth used for occultation. Required, and deliberately not
-            defaulted: this simulator stamps it onto every interval it hands
-            to a source, so that a history built against one Earth and a
+            defaulted: this simulator passes it explicitly to every
+            `source.random_photon` call it makes, rather than reading it off
+            the pose, so that a history built against one Earth and a
             simulation run against another cannot silently disagree about
             what is blocked.
         doppler_broadening : bool
@@ -174,9 +173,11 @@ class InertialSimulator(SimulatorBase):
         Yields
         ------
         (`SpacecraftInterval`, float, float, float)
-            `(pose, start_s, stop_s, livetime_s)`: the interval's pose, with
-            this simulator's `earth` stamped onto it, followed by the clipped
-            start time, stop time and livetime as plain floats in seconds.
+            `(pose, start_s, stop_s, livetime_s)`: the interval's pose,
+            followed by the clipped start time, stop time and livetime as
+            plain floats in seconds. `pose` alone does not carry an Earth --
+            see `self.earth`, passed separately to every `random_photon`
+            call in `run_events`.
         """
 
         window_start = -np.inf if tstart is None else tstart.to_value(u.s)
@@ -198,7 +199,7 @@ class InertialSimulator(SimulatorBase):
             # fraction of the interval that survived the clip.
             live = interval.livetime.to_value(u.s) * (hi - lo) / (stop - start)
 
-            yield replace(interval, earth = self.earth), lo, hi, live
+            yield interval, lo, hi, live
 
     def _expected_counts(self, tstart = None, tstop = None):
         """
@@ -283,7 +284,7 @@ class InertialSimulator(SimulatorBase):
 
                         pbar.update()
 
-                        event = self._simulate_one(source, pose)
+                        event = self._simulate_one(source, pose, self.earth)
 
                         if event is None:
                             # Occulted by the Earth before it was ever thrown.

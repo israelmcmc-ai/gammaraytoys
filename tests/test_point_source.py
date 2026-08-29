@@ -4,7 +4,7 @@ import pytest
 
 from gammaraytoys.sims import (PointSource, IsotropicSource,
                                MonoenergeticSpectrum, PowerLawSpectrum,
-                               Photon, SpacecraftInterval)
+                               Photon, SpacecraftInterval, Earth)
 
 
 def test_pointsource_flux_from_pivot():
@@ -256,12 +256,13 @@ def test_isotropic_source_random_photon_unocculted_pose_changes_nothing(tracker)
     distant_pose = SpacecraftInterval(
         start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
         orbit_radius=1e6 * u.km, orbit_angle=0 * u.deg, attitude=0 * u.deg)
+    earth = Earth()
 
     np.random.seed(54321)
     photon_no_pose = source.random_photon(tracker)
 
     np.random.seed(54321)
-    photon_with_pose = source.random_photon(tracker, pose=distant_pose)
+    photon_with_pose = source.random_photon(tracker, pose=distant_pose, earth=earth)
 
     assert photon_with_pose.direction == photon_no_pose.direction
     assert photon_with_pose.energy == photon_no_pose.energy
@@ -278,9 +279,14 @@ def test_isotropic_source_random_photon_unocculted_pose_changes_nothing(tracker)
 # out of the implementation.
 
 def _pose(attitude_deg, sky_angle_deg, orbit_radius_km = 6771.0):
-    """A one-second `SpacecraftInterval` at a given attitude, with nadir
-    placed opposite `sky_angle_deg` on the sky so the source is guaranteed
-    visible.
+    """A one-second `(SpacecraftInterval, Earth)` pair at a given attitude,
+    with nadir placed opposite `sky_angle_deg` on the sky so the source is
+    guaranteed visible.
+
+    The Earth is no longer carried on the pose (PR 3's `random_photon` takes
+    it as its own argument instead, see `FarFieldSource._occulted`), so this
+    helper hands back the two separately; pass both straight through to
+    `random_photon(tracker, pose=pose, earth=earth)`.
 
     Occultation depends only on `orbit_angle` (nadir = orbit_angle + 180
     deg) and `orbit_radius` -- never on `attitude` -- so a fixed
@@ -309,6 +315,8 @@ def _pose(attitude_deg, sky_angle_deg, orbit_radius_km = 6771.0):
 
     orbit_angle_deg = sky_angle_deg % 360.0
 
+    earth = Earth()
+
     pose = SpacecraftInterval(start_time = 0 * u.s,
                               stop_time = 1 * u.s,
                               livetime = 1 * u.s,
@@ -316,13 +324,13 @@ def _pose(attitude_deg, sky_angle_deg, orbit_radius_km = 6771.0):
                               orbit_angle = orbit_angle_deg * u.deg,
                               attitude = attitude_deg * u.deg)
 
-    assert not pose.earth.is_occulted(
+    assert not earth.is_occulted(
         sky_angle_deg * u.deg, pose.orbit_angle, pose.orbit_radius), (
         f"_pose fixture bug: sky_angle={sky_angle_deg} deg is occulted by "
         f"the Earth at orbit_angle={orbit_angle_deg} deg, "
         f"orbit_radius={orbit_radius_km} km")
 
-    return pose
+    return pose, earth
 
 
 def _wrap180(angle_deg):
@@ -381,7 +389,8 @@ def test_pointsource_sky_angle_photon_direction_follows_the_plan_transform(
                          spectrum=MonoenergeticSpectrum(1 * u.MeV),
                          flux=1 / u.cm / u.s)
 
-    photon = source.random_photon(tracker, pose=_pose(attitude_deg, sky_angle_deg))
+    pose, earth = _pose(attitude_deg, sky_angle_deg)
+    photon = source.random_photon(tracker, pose=pose, earth=earth)
 
     assert photon is not None
 
@@ -402,7 +411,8 @@ def test_pointsource_sky_angle_photon_direction_is_wrapped_into_zero_to_360(trac
                          flux=1 / u.cm / u.s)
 
     for _ in range(10):
-        photon = source.random_photon(tracker, pose=_pose(0.0, 135.0))
+        pose, earth = _pose(0.0, 135.0)
+        photon = source.random_photon(tracker, pose=pose, earth=earth)
 
         direction = photon.direction.to_value(u.deg)
 
@@ -425,7 +435,8 @@ def test_pointsource_sky_angle_photon_starts_on_the_plane_for_its_offaxis_angle(
     radius = tracker.surrounding_circle_radius.to_value(u.cm)
 
     for _ in range(20):
-        photon = source.random_photon(tracker, pose=_pose(attitude_deg, sky_angle_deg))
+        pose, earth = _pose(attitude_deg, sky_angle_deg)
+        photon = source.random_photon(tracker, pose=pose, earth=earth)
 
         assert _radial_offset(tracker, photon.position, offaxis).to_value(u.cm) == pytest.approx(
             radius)
@@ -438,8 +449,11 @@ def test_pointsource_sky_angle_tracks_a_changing_attitude(tracker):
                          spectrum=MonoenergeticSpectrum(1 * u.MeV),
                          flux=1 / u.cm / u.s)
 
-    directions = [source.random_photon(tracker, pose=_pose(a, 17.0)).direction.to_value(u.deg)
-                  for a in (0.0, 90.0, 180.0, 270.0)]
+    directions = []
+    for a in (0.0, 90.0, 180.0, 270.0):
+        pose, earth = _pose(a, 17.0)
+        directions.append(
+            source.random_photon(tracker, pose=pose, earth=earth).direction.to_value(u.deg))
 
     for i in range(1, len(directions)):
         # direction_det = 270 - (A - lambda), so it *decreases* by 90 deg
@@ -462,7 +476,8 @@ def test_pointsource_offaxis_angle_is_unaffected_by_a_real_pose(tracker):
     # the pose entirely, occultation included, so any value satisfies _pose's
     # visibility premise without affecting what this test actually checks.
     np.random.seed(2024)
-    with_pose = source.random_photon(tracker, pose=_pose(123.0, 0.0))
+    pose, earth = _pose(123.0, 0.0)
+    with_pose = source.random_photon(tracker, pose=pose, earth=earth)
 
     assert with_pose is not None
     assert with_pose.direction == without.direction

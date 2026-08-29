@@ -143,7 +143,7 @@ class SimulatorBase:
                      self.phi_axis,
                      self.psi_axis])
 
-    def _simulate_one(self, source, pose = None):
+    def _simulate_one(self, source, pose = None, earth = None):
         """
         Draw one photon from `source`, walk it through the detector and
         reconstruct it.
@@ -159,6 +159,11 @@ class SimulatorBase:
             Spacecraft pose, forwarded to `source.random_photon`. `None`
             (the default) is pure detector-frame mode, in which no source
             can be occulted and this method therefore never returns `None`.
+        earth : `Earth` or None
+            The Earth to test occultation against, forwarded to
+            `source.random_photon`. Ignored when `pose` is `None`; required
+            (raises otherwise) for an occultable far-field source given a
+            `pose` (see `FarFieldSource._occulted`).
 
         Returns
         -------
@@ -168,7 +173,7 @@ class SimulatorBase:
             occulted at this pose and no photon was launched at all.
         """
 
-        primary = source.random_photon(self.detector, pose)
+        primary = source.random_photon(self.detector, pose, earth)
 
         if primary is None:
             # Occulted: nothing was ever launched at the detector.

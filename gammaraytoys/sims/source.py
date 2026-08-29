@@ -258,7 +258,7 @@ class Source(ABC):
         return ax
 
     @abstractmethod
-    def random_photon(self, detector, pose = None):
+    def random_photon(self, detector, pose = None, earth = None):
         """
         Draw one random photon aimed at the detector.
 
@@ -275,6 +275,15 @@ class Source(ABC):
             source in inertial mode: it is aimed through the spacecraft's
             attitude (see `gammaraytoys.sims.transform`) and its photons are
             subject to Earth occultation (see `FarFieldSource.occultable`).
+        earth : `Earth` or None
+            The Earth to test occultation against. Only consulted when
+            `pose` is given and this is an occultable far-field source (see
+            `FarFieldSource.occultable`); ignored otherwise. The Earth is
+            not part of a pose in any physical sense -- it is passed
+            separately rather than read off `pose` -- so an occultable
+            source given a `pose` with no `earth` raises, instead of
+            silently assuming a default `Earth()` that may not match the
+            one the rest of the run uses (see `FarFieldSource._occulted`).
 
         Returns
         -------
@@ -424,7 +433,7 @@ class FarFieldSource(Source):
         """
         return True
 
-    def _occulted(self, sky_angle, pose):
+    def _occulted(self, sky_angle, pose, earth):
         """
         Whether a photon arriving from inertial sky angle `sky_angle` is
         blocked by the Earth at this pose.
@@ -443,20 +452,35 @@ class FarFieldSource(Source):
             Inertial direction the photon arrives *from*, `lambda`, CCW from
             inertial +X (angle units).
         pose : `SpacecraftInterval`
-            The spacecraft pose, supplying `orbit_angle`, `orbit_radius` and
-            the `earth` to test against.
+            The spacecraft pose, supplying `orbit_angle` and `orbit_radius`.
+        earth : `Earth`
+            The Earth to test occultation against. Required whenever
+            `self.occultable` is `True` -- raises `ValueError` if `None`,
+            rather than silently defaulting to some `Earth()` that might not
+            be the one the rest of the run uses (see the caller,
+            `random_photon`).
 
         Returns
         -------
         bool
             `True` if the photon is occulted and must be discarded. Always
             `False` when `self.occultable` is `False`.
+
+        Raises
+        ------
+        ValueError
+            If `self.occultable` is `True` and `earth` is `None`.
         """
 
         if not self.occultable:
             return False
 
-        earth = pose.earth
+        if earth is None:
+            raise ValueError(
+                f"{type(self).__name__} is occultable and was given a pose "
+                "(inertial mode), so it needs an `earth` to test occultation "
+                "against. Pass `earth`, e.g. the same `Earth` the spacecraft "
+                "history was built with.")
 
         return bool(earth._is_occulted(
             sky_angle.to_value(u.rad),
@@ -905,12 +929,12 @@ class PointSource(FarFieldSource):
         return  Cartesian2D(self._plane_origin.x + self._throw_parallel.x * perp_norm_dist,
                             self._plane_origin.y + self._throw_parallel.y * perp_norm_dist)
 
-    def random_photon(self, detector, pose = None):
+    def random_photon(self, detector, pose = None, earth = None):
         """
         Draw one random photon aimed at the detector.
 
         For a detector-frame source (built with `offaxis_angle`) this simply
-        throws from that fixed off-axis angle and `pose` is ignored
+        throws from that fixed off-axis angle and `pose`/`earth` are ignored
         entirely, occultation included -- there is no sky direction to
         occult.
 
@@ -927,6 +951,11 @@ class PointSource(FarFieldSource):
             Spacecraft pose. Ignored for a detector-frame source; required
             for an inertial one, whose off-axis angle is undefined without
             an attitude.
+        earth : `Earth` or None
+            The Earth to test occultation against. Ignored for a
+            detector-frame source; required (raises otherwise) for an
+            inertial one, since this source is occultable
+            (`FarFieldSource.occultable`).
 
         Returns
         -------
@@ -939,7 +968,8 @@ class PointSource(FarFieldSource):
         Raises
         ------
         ValueError
-            If this source was given a `sky_angle` and no `pose`.
+            If this source was given a `sky_angle` and no `pose`, or if it
+            has a `pose` but no `earth` (see `FarFieldSource._occulted`).
         """
 
         if self.sky_angle is not None:
@@ -955,7 +985,7 @@ class PointSource(FarFieldSource):
             # Re-aim at Nu = A - lambda for this pose (Section 3.4).
             self.offaxis_angle = sky_angle_to_offaxis(self.sky_angle, pose.attitude)
 
-            if self._occulted(self.sky_angle, pose):
+            if self._occulted(self.sky_angle, pose, earth):
                 return None
 
         chirality = copy(self.chirality)
@@ -1071,7 +1101,7 @@ class IsotropicSource(FarFieldSource):
         """The source's energy spectrum."""
         return self._spectrum
 
-    def random_photon(self, detector, pose = None):
+    def random_photon(self, detector, pose = None, earth = None):
         """
         Draw one random photon from a uniformly random direction.
 
@@ -1091,6 +1121,10 @@ class IsotropicSource(FarFieldSource):
         pose : `SpacecraftInterval` or None
             Spacecraft pose. `None` (the default) means pure detector-frame
             mode, with no occultation.
+        earth : `Earth` or None
+            The Earth to test occultation against. Ignored when `pose` is
+            `None`; required (raises otherwise) when `pose` is given, since
+            this source is occultable (`FarFieldSource.occultable`).
 
         Returns
         -------
@@ -1099,6 +1133,12 @@ class IsotropicSource(FarFieldSource):
             `[0, 360) deg`, with an energy drawn from `spectrum` and a
             chirality drawn per `chirality`/`chirality_degree`; `None` if
             that direction was occulted by the Earth at this pose.
+
+        Raises
+        ------
+        ValueError
+            If `pose` is given but `earth` is not (see
+            `FarFieldSource._occulted`).
         """
 
         # Re-sync in case these were changed after construction
@@ -1111,7 +1151,7 @@ class IsotropicSource(FarFieldSource):
         if pose is not None:
             sky_angle = offaxis_to_sky_angle(offaxis_angle, pose.attitude)
 
-            if self._occulted(sky_angle, pose):
+            if self._occulted(sky_angle, pose, earth):
                 return None
 
         return self._point_source.random_photon(detector = detector)
