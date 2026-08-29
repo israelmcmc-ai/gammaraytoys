@@ -277,20 +277,52 @@ def test_isotropic_source_random_photon_unocculted_pose_changes_nothing(tracker)
 # direction below is that formula evaluated by hand, never a value read back
 # out of the implementation.
 
-def _pose(attitude_deg, orbit_angle_deg = 135.0, orbit_radius_km = 6771.0):
-    """A one-second `SpacecraftInterval` at a given attitude.
+def _pose(attitude_deg, sky_angle_deg, orbit_radius_km = 6771.0):
+    """A one-second `SpacecraftInterval` at a given attitude, with nadir
+    placed opposite `sky_angle_deg` on the sky so the source is guaranteed
+    visible.
 
-    `orbit_angle` defaults to 135 deg, putting nadir at 315 deg, so a source
-    at the sky angles used below is comfortably outside the Earth's disc
-    (rho = arcsin(6371/6771) = 70.2 deg) whatever the attitude.
+    Occultation depends only on `orbit_angle` (nadir = orbit_angle + 180
+    deg) and `orbit_radius` -- never on `attitude` -- so a fixed
+    `orbit_angle` picked once (as this helper used to do, defaulting to
+    135 deg on the mistaken belief that nadir at 315 deg was "comfortably
+    outside the Earth's disc" for every sky angle used below, and using a
+    wrong Earth radius of 6371 km besides -- astropy's default `R_earth`
+    is 6378.1 km, giving rho = arcsin(6378.1/6771) = 70.39 deg, not 70.2 --
+    can still leave a source occulted; sky_angle = 0, 10 and 17 deg all
+    fell inside that wedge) can only be checked by hand for the specific
+    angles a test happens to use.
+
+    Deriving `orbit_angle` from the source itself sidesteps that: putting
+    nadir at `sky_angle_deg + 180 deg` puts the *anti*-nadir exactly on
+    the source, the maximum possible 180 deg separation from nadir. Since
+    a valid orbit always has `orbit_radius > R_E`, `rho = arcsin(R_E / r)`
+    is always below 90 deg, so 180 deg separation is occultation-proof by
+    construction -- for any sky angle, any attitude, any orbit radius a
+    caller passes here, not just the ones exercised today.
+
+    The premise is still asserted below, against the real `Earth` and the
+    real occultation geometry, so that a future change to this helper (or
+    to the occultation formula itself) cannot silently reintroduce a
+    hidden source instead of failing loudly.
     """
 
-    return SpacecraftInterval(start_time = 0 * u.s,
+    orbit_angle_deg = sky_angle_deg % 360.0
+
+    pose = SpacecraftInterval(start_time = 0 * u.s,
                               stop_time = 1 * u.s,
                               livetime = 1 * u.s,
                               orbit_radius = orbit_radius_km * u.km,
                               orbit_angle = orbit_angle_deg * u.deg,
                               attitude = attitude_deg * u.deg)
+
+    assert not pose.earth.is_occulted(
+        sky_angle_deg * u.deg, pose.orbit_angle, pose.orbit_radius), (
+        f"_pose fixture bug: sky_angle={sky_angle_deg} deg is occulted by "
+        f"the Earth at orbit_angle={orbit_angle_deg} deg, "
+        f"orbit_radius={orbit_radius_km} km")
+
+    return pose
 
 
 def _wrap180(angle_deg):
@@ -349,7 +381,7 @@ def test_pointsource_sky_angle_photon_direction_follows_the_plan_transform(
                          spectrum=MonoenergeticSpectrum(1 * u.MeV),
                          flux=1 / u.cm / u.s)
 
-    photon = source.random_photon(tracker, pose=_pose(attitude_deg))
+    photon = source.random_photon(tracker, pose=_pose(attitude_deg, sky_angle_deg))
 
     assert photon is not None
 
@@ -370,7 +402,7 @@ def test_pointsource_sky_angle_photon_direction_is_wrapped_into_zero_to_360(trac
                          flux=1 / u.cm / u.s)
 
     for _ in range(10):
-        photon = source.random_photon(tracker, pose=_pose(0.0))
+        photon = source.random_photon(tracker, pose=_pose(0.0, 135.0))
 
         direction = photon.direction.to_value(u.deg)
 
@@ -393,7 +425,7 @@ def test_pointsource_sky_angle_photon_starts_on_the_plane_for_its_offaxis_angle(
     radius = tracker.surrounding_circle_radius.to_value(u.cm)
 
     for _ in range(20):
-        photon = source.random_photon(tracker, pose=_pose(attitude_deg))
+        photon = source.random_photon(tracker, pose=_pose(attitude_deg, sky_angle_deg))
 
         assert _radial_offset(tracker, photon.position, offaxis).to_value(u.cm) == pytest.approx(
             radius)
@@ -406,7 +438,7 @@ def test_pointsource_sky_angle_tracks_a_changing_attitude(tracker):
                          spectrum=MonoenergeticSpectrum(1 * u.MeV),
                          flux=1 / u.cm / u.s)
 
-    directions = [source.random_photon(tracker, pose=_pose(a)).direction.to_value(u.deg)
+    directions = [source.random_photon(tracker, pose=_pose(a, 17.0)).direction.to_value(u.deg)
                   for a in (0.0, 90.0, 180.0, 270.0)]
 
     for i in range(1, len(directions)):
@@ -426,8 +458,11 @@ def test_pointsource_offaxis_angle_is_unaffected_by_a_real_pose(tracker):
     np.random.seed(2024)
     without = source.random_photon(tracker)
 
+    # `sky_angle_deg` here is a don't-care: an `offaxis_angle` source ignores
+    # the pose entirely, occultation included, so any value satisfies _pose's
+    # visibility premise without affecting what this test actually checks.
     np.random.seed(2024)
-    with_pose = source.random_photon(tracker, pose=_pose(123.0))
+    with_pose = source.random_photon(tracker, pose=_pose(123.0, 0.0))
 
     assert with_pose is not None
     assert with_pose.direction == without.direction
