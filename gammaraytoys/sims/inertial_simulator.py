@@ -64,7 +64,12 @@ class InertialSimulator(SimulatorBase):
             `source.random_photon` call it makes, rather than reading it off
             the pose, so that a history built against one Earth and a
             simulation run against another cannot silently disagree about
-            what is blocked.
+            what is blocked. Checked at construction (see `_validate_earth`)
+            against every `orbit_radius` in `spacecraft_history`, since an
+            inconsistent pair would otherwise disagree silently: `Earth`'s
+            hot occultation path is deliberately unvalidated, so a
+            mismatched Earth would turn into `nan`s and switch occultation
+            off for the whole run without raising anything.
         doppler_broadening : bool
             Whether to apply the detector's energy-resolution Doppler
             broadening to the first interaction of each event (see
@@ -73,12 +78,15 @@ class InertialSimulator(SimulatorBase):
         Raises
         ------
         ValueError
-            If any source has no normalization set (its `simulated_rate()`
-            is `None`), or if any far-field source is aimed by a
-            detector-frame `offaxis_angle` instead of a `sky_angle`. Both
-            name the offending source: without the first check the missing
-            normalization would only surface much later, as a `TypeError`
-            deep inside the Poisson mean.
+            If `earth`'s radius does not leave every interval's
+            `orbit_radius` in `spacecraft_history` strictly above it (see
+            `_validate_earth`); if any source has no normalization set (its
+            `simulated_rate()` is `None`); or if any far-field source is
+            aimed by a detector-frame `offaxis_angle` instead of a
+            `sky_angle`. The latter two name the offending source: without
+            the normalization check the missing normalization would only
+            surface much later, as a `TypeError` deep inside the Poisson
+            mean.
         """
 
         super().__init__(detector = detector,
@@ -89,11 +97,53 @@ class InertialSimulator(SimulatorBase):
         self.spacecraft_history = spacecraft_history
         self.earth = earth
 
+        self._validate_earth()
         self._validate_sources()
 
         self.nsim = 0
         self.ntrig = 0
         self.noccult = 0
+
+    def _validate_earth(self):
+        """
+        Check that `self.earth` agrees with every `orbit_radius` in
+        `self.spacecraft_history`, and raise if not.
+
+        `self.earth` is taken separately from `spacecraft_history` (see the
+        `earth` parameter above) precisely so the two can disagree -- a
+        history built against one `Earth` and a run against another. Nothing
+        else catches that: `Earth._is_occulted`, the per-photon hot path, is
+        deliberately unvalidated (Section 4.5's `_angular_radius_rad`), so a
+        mismatched Earth whose radius exceeds some interval's `orbit_radius`
+        would make `arcsin(R_E / r)` a silent `nan`, `abs(delta) < nan` a
+        silent `False` for every photon, and occultation would vanish from
+        the run without so much as an exception -- only a numpy
+        `RuntimeWarning` deep in the loop.
+
+        This walks every interval once, up front, rather than leaving the
+        check to fire on whichever photon happens to hit it first (it might
+        never fire at all, since `_is_occulted` is never wrong loudly --
+        only silently).
+
+        Raises
+        ------
+        ValueError
+            If any interval's `orbit_radius` does not exceed `self.earth`'s
+            radius. Delegates to `Earth.angular_radius`, which already
+            raises with a clear message naming both radii -- there is no
+            new error text to maintain here.
+        """
+
+        min_radius = None
+
+        for interval in self.spacecraft_history:
+            if min_radius is None or interval.orbit_radius < min_radius:
+                min_radius = interval.orbit_radius
+
+        if min_radius is not None:
+            # Raises ValueError, with a message naming both radii, if
+            # min_radius does not exceed self.earth.radius.
+            self.earth.angular_radius(min_radius)
 
     def _validate_sources(self):
         """

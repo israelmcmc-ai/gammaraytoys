@@ -961,9 +961,12 @@ class PointSource(FarFieldSource):
         -------
         `Photon` or None
             A photon starting on the throwing plane, flying along
-            `270 deg - offaxis_angle`, with an energy drawn from `spectrum`
-            and a chirality drawn per `chirality`/`chirality_degree`;
-            `None` if the source was occulted by the Earth at this pose.
+            `270 deg - offaxis_angle` wrapped into `[0, 360) deg` (see
+            `Particle.__init__`) -- for a negative `offaxis_angle` this is
+            `270 deg - offaxis_angle - 360 deg`, not the raw, possibly
+            out-of-range value -- with an energy drawn from `spectrum` and
+            a chirality drawn per `chirality`/`chirality_degree`; `None` if
+            the source was occulted by the Earth at this pose.
 
         Raises
         ------

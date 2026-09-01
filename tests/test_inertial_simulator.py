@@ -28,7 +28,7 @@ from gammaraytoys import ToyTracker2D
 from gammaraytoys.sims import (Earth, InertialSimulator, IsotropicSource,
                                MonoenergeticSpectrum, PointSource,
                                SimpleTraditionalReconstructor, SpacecraftHistory,
-                               SpinPointing, ZenithPointing)
+                               SpacecraftInterval, SpinPointing, ZenithPointing)
 
 
 # --- geometry constants, fixed here rather than taken from astropy -------
@@ -339,6 +339,74 @@ def test_isotropic_source_loses_the_earth_disc_fraction_of_its_photons():
     assert abs(len(events) - expected) < 4 * sigma
 
 
+def test_isotropic_source_occultation_wedge_is_centred_on_attitude_minus_nadir():
+    # F2 (PR3 review): the test above only checks *how many* photons an
+    # IsotropicSource loses to the Earth, at a pose (theta = 0,
+    # ZenithPointing => A = 0) where the occulted wedge happens to be
+    # symmetric about Nu = 0. A source that forgot to convert its
+    # detector-frame draw to an inertial sky angle before testing occultation
+    # -- i.e. tested `offaxis_angle` itself against the Earth instead of
+    # `offaxis_to_sky_angle(offaxis_angle, attitude)` -- would produce a
+    # wedge that is *also* symmetric about Nu = 0 at that same pose, so the
+    # count would come out identical and the bug would go unnoticed. This
+    # test instead pins a non-trivial attitude and checks *where* the wedge
+    # falls, sample by sample.
+    #
+    # Geometry, worked out by hand (never read back from the implementation):
+    # a pose at orbit_angle = 0 deg and attitude A = 50 deg gives
+    #     nadir = orbit_angle + 180 deg = 180 deg
+    #     rho   = arcsin(R_E / r) = RHO_RAD (module constant) = 70.2074 deg
+    # A source is occulted iff its inertial sky angle lambda falls within rho
+    # of nadir. Since lambda = A - Nu (mod 360), that sky-angle wedge maps to
+    # an off-axis-angle wedge centred at
+    #     Nu = A - nadir = 50 - 180 = -130 deg
+    # of half-width rho (full width 2*rho = 140.4 deg): the map
+    # lambda -> Nu = A - lambda is a reflection, which preserves interval
+    # widths and just relabels the centre.
+    earth = _make_earth()
+    detector = _make_tracker()
+
+    orbit_angle = 0 * u.deg
+    attitude = 50 * u.deg
+
+    pose = SpacecraftInterval(start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+                              orbit_radius=ORBIT_RADIUS, orbit_angle=orbit_angle,
+                              attitude=attitude)
+
+    expected_center_deg = _wrap180(attitude.to_value(u.deg) - orbit_angle.to_value(u.deg) - 180.0)
+    expected_halfwidth_deg = np.degrees(RHO_RAD)
+
+    assert expected_center_deg == pytest.approx(-130.0)
+    assert 2 * expected_halfwidth_deg == pytest.approx(140.41480693771166)
+
+    source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV), flux=1 / u.cm / u.s)
+
+    n_samples = 3000
+    offaxis_samples = np.empty(n_samples)
+    occluded_samples = np.empty(n_samples, dtype=bool)
+
+    for i in range(n_samples):
+        photon = source.random_photon(detector, pose, earth)
+
+        # IsotropicSource re-aims its single reusable PointSource to the
+        # off-axis angle it just drew, whether or not that draw survived
+        # occultation (see IsotropicSource.random_photon), so this is
+        # exactly the Nu that was tested.
+        offaxis_samples[i] = source._point_source.offaxis_angle.to_value(u.deg)
+        occluded_samples[i] = photon is None
+
+    # At least some photons must have been thrown and some occulted, or the
+    # comparison below would be vacuous.
+    assert 0 < np.count_nonzero(occluded_samples) < n_samples
+
+    nu_relative_to_wedge = _wrap180(offaxis_samples - expected_center_deg)
+    predicted_occluded = np.abs(nu_relative_to_wedge) < expected_halfwidth_deg
+
+    # Exact, per-sample agreement -- not a statistical count -- between the
+    # hand-worked wedge and what the real code actually rejected.
+    assert np.array_equal(occluded_samples, predicted_occluded)
+
+
 # --- occultable = False --------------------------------------------------
 #
 # A sixth of an orbit sweeps theta from 0 to 60 deg, so nadir stays in
@@ -613,12 +681,73 @@ def test_tstart_and_tstop_narrow_the_run_to_that_window():
     times = np.array([event[0].to_value(u.s) for event in events])
 
     assert np.all(times >= tstart.to_value(u.s))
-    assert np.all(times <= tstop.to_value(u.s))
+    # `np.random.uniform` is half-open on the high end (see `_poses`'s
+    # `np.random.uniform(start, stop)`), so a timestamp can never land on
+    # tstop itself.
+    assert np.all(times < tstop.to_value(u.s))
 
     # Half the livetime, so half the counts: mu = 300, sigma = 17.3,
     # 4 sigma = +-69. Ignoring the window would give 600, i.e. 17 sigma away.
     expected = mu_full / 2
     assert abs(len(events) - expected) < 4 * np.sqrt(expected)
+
+
+def test_tstart_and_tstop_rescale_livetime_for_a_partially_clipped_interval():
+    # F3 (PR3 review): the test above picks a window that falls exactly on
+    # interval boundaries, so no interval is ever partly clipped and the
+    # `live = interval.livetime * (hi - lo) / (stop - start)` rescale in
+    # `_poses` (Section 6) never actually gets exercised. This test instead
+    # picks a window that clips a single interval in half, so an
+    # implementation that used the interval's *unrescaled* livetime for a
+    # partial overlap would be caught.
+    #
+    # 10 intervals of 200 s each (2000 s total); tstart = 50 s, tstop = 150 s
+    # falls entirely inside interval 0 = [0, 200) s, clipping it to a 100 s
+    # overlap out of its 200 s span. No other interval overlaps the window at
+    # all. With mu_full drawn against the *full* 2000 s duration, the
+    # correctly rescaled expectation is mu_full * (100 / 2000) = mu_full / 20.
+    earth = _make_earth()
+    detector = _make_tracker()
+
+    n_intervals = 10
+    interval_span = 200 * u.s
+    duration = n_intervals * interval_span
+
+    mu_full = 4000.0
+    flux = _flux_for_expected_counts(mu_full, detector, duration)
+
+    history = _make_history(duration, n_intervals, earth)
+
+    source = PointSource(sky_angle=CLEAN_SKY_ANGLE,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=flux)
+
+    assert _visible_livetime_fraction(history, CLEAN_SKY_ANGLE) == 1.0
+
+    tstart = 50 * u.s
+    tstop = 150 * u.s
+
+    simulator = InertialSimulator(detector=detector,
+                                  sources=source,
+                                  reconstructor=SimpleTraditionalReconstructor(),
+                                  spacecraft_history=history,
+                                  earth=earth)
+
+    events = list(simulator.run_events(tstart=tstart, tstop=tstop))
+
+    times = np.array([event[0].to_value(u.s) for event in events])
+
+    assert np.all(times >= tstart.to_value(u.s))
+    assert np.all(times < tstop.to_value(u.s))
+
+    # Correct: mu = 4000 * 100/2000 = 200, sigma = sqrt(200) = 14.1,
+    # 4 sigma = +-56.6. An unrescaled implementation, using interval 0's
+    # full 200 s livetime instead of the 100 s overlap, would sit at
+    # mu = 400 -- about 14 sigma away.
+    expected = mu_full * 100.0 / duration.to_value(u.s)
+    sigma = np.sqrt(expected)
+
+    assert abs(len(events) - expected) < 4 * sigma
 
 
 # --- what run_events actually yields -------------------------------------
@@ -707,6 +836,46 @@ def test_offaxis_angle_far_field_source_raises_at_construction():
     message = str(excinfo.value).lower()
 
     assert 'axis' in message or 'sky' in message, str(excinfo.value)
+
+
+def test_mismatched_earth_raises_at_construction():
+    # F1 (PR3 review): `earth` is taken separately from `spacecraft_history`
+    # precisely so the two can disagree with each other -- but nothing
+    # checked that they didn't. If earth.radius > some interval's
+    # orbit_radius, `Earth._is_occulted`'s `arcsin(R_E / r)` silently
+    # produces `nan`, `abs(delta) < nan` is always `False`, and occultation
+    # vanishes from the whole run with nothing louder than a numpy
+    # RuntimeWarning. This must be caught at construction instead.
+    earth_history = _make_earth()  # radius = EARTH_RADIUS = 6371 km
+    detector = _make_tracker()
+
+    history = _make_history(500 * u.s, 5, earth_history)  # orbit_radius = 6771 km
+
+    source = PointSource(sky_angle=10 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1e-3 / u.cm / u.s)
+
+    # An Earth whose radius exceeds the history's orbit_radius: exactly the
+    # inconsistency this check exists to catch.
+    mismatched_earth = Earth(radius=50000 * u.km)
+
+    with pytest.raises(ValueError) as excinfo:
+        InertialSimulator(detector=detector,
+                          sources=source,
+                          reconstructor=SimpleTraditionalReconstructor(),
+                          spacecraft_history=history,
+                          earth=mismatched_earth)
+
+    message = str(excinfo.value)
+    assert '50000' in message or '50000.0' in message
+
+    # A consistent Earth (the one the history was actually validated
+    # against) must still construct without complaint.
+    InertialSimulator(detector=detector,
+                      sources=source,
+                      reconstructor=SimpleTraditionalReconstructor(),
+                      spacecraft_history=history,
+                      earth=earth_history)
 
 
 def test_sky_angle_source_raises_when_used_without_a_pose():

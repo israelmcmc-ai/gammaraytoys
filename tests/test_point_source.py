@@ -497,3 +497,47 @@ def test_farfield_sources_are_occultable_by_default():
     assert PointSource(offaxis_angle=0 * u.deg, spectrum=spec).occultable is True
     assert PointSource(sky_angle=0 * u.deg, spectrum=spec).occultable is True
     assert IsotropicSource(spectrum=spec).occultable is True
+
+
+# --- F4 (PR3 review): FarFieldSource._occulted's earth=None error branch ---
+#
+# `_occulted` documents (source.py) that an occultable source given a pose
+# but no `earth` must raise `ValueError`, rather than silently skipping the
+# occultation test or crashing somewhere deeper (e.g. `None.radius`).
+# Nothing asserted this for either `PointSource` or `IsotropicSource`.
+
+def _pose_only(attitude_deg = 0.0, orbit_angle_deg = 0.0, orbit_radius_km = 6771.0):
+    """A bare `SpacecraftInterval`, with no `Earth` at all -- for testing the
+    `pose is not None, earth is None` error branch."""
+
+    return SpacecraftInterval(start_time = 0 * u.s,
+                              stop_time = 1 * u.s,
+                              livetime = 1 * u.s,
+                              orbit_radius = orbit_radius_km * u.km,
+                              orbit_angle = orbit_angle_deg * u.deg,
+                              attitude = attitude_deg * u.deg)
+
+
+def test_pointsource_sky_angle_raises_when_given_a_pose_but_no_earth(tracker):
+    source = PointSource(sky_angle = 10 * u.deg,
+                         spectrum = MonoenergeticSpectrum(1 * u.MeV),
+                         flux = 1 / u.cm / u.s)
+
+    pose = _pose_only()
+
+    with pytest.raises(ValueError) as excinfo:
+        source.random_photon(tracker, pose = pose, earth = None)
+
+    assert 'earth' in str(excinfo.value).lower()
+
+
+def test_isotropic_source_raises_when_given_a_pose_but_no_earth(tracker):
+    source = IsotropicSource(spectrum = MonoenergeticSpectrum(1 * u.MeV),
+                             flux = 1 / u.cm / u.s)
+
+    pose = _pose_only()
+
+    with pytest.raises(ValueError) as excinfo:
+        source.random_photon(tracker, pose = pose, earth = None)
+
+    assert 'earth' in str(excinfo.value).lower()
