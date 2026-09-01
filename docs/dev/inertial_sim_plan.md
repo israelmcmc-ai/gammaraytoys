@@ -345,8 +345,14 @@ and say which in the PR.
 ### 5.3 `random_photon()`
 
 ```python
-def random_photon(self, detector, pose = None) -> Photon | None
+def random_photon(self, detector, pose = None, earth = None) -> Photon | None
 ```
+
+**Updated in PR 3.** `earth` is passed explicitly rather than reached through the
+pose: the source needs an `Earth` to test occultation, and threading it on the pose
+meant a source could silently disagree with the simulator's Earth. Every source that
+overrides `random_photon` must accept it, and `SimulatorBase._simulate_one` passes it
+positionally. An occultable far-field source given a `pose` but no `earth` raises.
 
 Returns a `Photon` in the **detector frame**, ready for `detector.simulate_event()`,
 or `None` if the photon was occulted. `pose` is a `SpacecraftInterval`; when it is
