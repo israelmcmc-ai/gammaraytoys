@@ -19,8 +19,11 @@ Per PR, three agents with separate roles:
 | Reviewer | Opus | Reviews implementation + tests against the plan and its §8 traps. |
 
 From PR 3 onward the implementer and test author run **concurrently**, both working
-only from the plan's API spec, so the tests are genuinely independent of the
-implementation rather than anchored on it.
+from one written API contract given to both, on **separate branches**
+(`...-pr3-inertial-simulator` and `...-pr3-tests`) so their independence is auditable
+and there is no push race. The test author reconciles at the end by merging the
+implementer's branch and running; a disagreement is a finding to report, never
+something to resolve by weakening the test.
 
 The orchestrator independently re-verifies every claim before opening a PR, including
 mutation-testing the new tests by injecting deliberate bugs.
@@ -30,8 +33,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 | PR | Scope | Branch | State |
 |---|---|---|---|
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
-| 2 | `Earth`, `SpacecraftHistory`, orbits | `claude/cosimita-pr2-spacecraft-history` | **PR #14 open** — awaiting maintainer |
-| 3 | `InertialSimulator`, transforms, occultation | — | Not started |
+| 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
+| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` (+ `-tests`) | **In progress** — implementer and test author running concurrently |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
 | 5 | `EarthAlbedoSource` | — | Not started |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
@@ -132,8 +135,8 @@ Carried forward until answered; they shape later PRs.
   so the two cannot drift.
 - **`attitude` and `orbit_angle` are unwrapped past 360 deg** (matching the plan's own
   SS4.1 example). PR 3's `Nu = A - lambda` owns the wrapping; PR 2 does none.
-- **`FarFieldSource` has no `occultable` property yet** (trap 1 requires it, `False` on
-  the albedo). Deliberately left out of PR 1; PR 3 or PR 5 adds it.
+- **`occultable`** is being added in PR 3, default `True`; PR 5's `EarthAlbedoSource`
+  overrides it `False` (trap 1).
 - **`PointSource.__init__` takes `offaxis_angle` as a required first positional.** PR 3
   must add `sky_angle` and make them mutually exclusive. Every call site in `docs/` and
   `tests/` uses the keyword form, so positional compatibility is not load-bearing.
