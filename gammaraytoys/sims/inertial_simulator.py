@@ -20,7 +20,7 @@ class InertialSimulator(SimulatorBase):
 
     The detector-frame physics is untouched and is reached *through* the
     sources' own coordinate transformations (see
-    `gammaraytoys.sims.transform`), not by subclassing `Simulator`.
+    `gammaraytoys.coordinates.transform`), not by subclassing `Simulator`.
 
     Per interval and per source the photon count is drawn from a Poisson
     distribution with mean `simulated_rate(detector, pose) * livetime` --
@@ -208,11 +208,14 @@ class InertialSimulator(SimulatorBase):
         contributes to the run.
 
         The `.ori` file's own time range is the run's extent; `tstart` and
-        `tstop` only narrow it. An interval that overlaps the requested window
-        only partly is clipped to the overlap: its livetime is scaled by the
-        overlapping fraction of its span, and its photons are timestamped
-        within the overlap. With no window given nothing is clipped and this
-        is exactly "every interval, whole".
+        `tstop` only narrow it. This is a thin wrapper over
+        `SpacecraftHistory.intervals`, which does the actual clipping (an
+        interval that overlaps the requested window only partly is clipped
+        to the overlap, with its livetime scaled by the overlapping fraction
+        of its span) -- this method just unpacks each clipped
+        `SpacecraftInterval` into the plain floats `run_events` and
+        `_expected_counts` want. With no window given nothing is clipped and
+        this is exactly "every interval, whole".
 
         Parameters
         ----------
@@ -230,26 +233,11 @@ class InertialSimulator(SimulatorBase):
             call in `run_events`.
         """
 
-        window_start = -np.inf if tstart is None else tstart.to_value(u.s)
-        window_stop = np.inf if tstop is None else tstop.to_value(u.s)
-
-        for interval in self.spacecraft_history:
-
-            start = interval.start_time.to_value(u.s)
-            stop = interval.stop_time.to_value(u.s)
-
-            lo = max(start, window_start)
-            hi = min(stop, window_stop)
-
-            if hi <= lo:
-                continue
-
-            # Timestamps are spread over the whole (clipped) span, while the
-            # livetime -- which only scales the count -- is scaled by the same
-            # fraction of the interval that survived the clip.
-            live = interval.livetime.to_value(u.s) * (hi - lo) / (stop - start)
-
-            yield interval, lo, hi, live
+        for interval in self.spacecraft_history.intervals(tstart, tstop):
+            yield (interval,
+                  interval.start_time.to_value(u.s),
+                  interval.stop_time.to_value(u.s),
+                  interval.livetime.to_value(u.s))
 
     def _expected_counts(self, tstart = None, tstop = None):
         """

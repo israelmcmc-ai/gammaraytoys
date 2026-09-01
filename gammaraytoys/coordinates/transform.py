@@ -28,7 +28,7 @@ boundary and does its arithmetic on plain floats internally (Section 3.5).
 import numpy as np
 import astropy.units as u
 
-from gammaraytoys.coordinates import Cartesian2D
+from .twodim import Cartesian2D
 
 __all__ = ['sky_angle_to_offaxis', 'offaxis_to_sky_angle',
            'inertial_to_detector_position', 'inertial_to_detector_direction',

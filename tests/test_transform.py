@@ -16,11 +16,11 @@ import astropy.units as u
 import numpy as np
 import pytest
 
-from gammaraytoys.coordinates import Cartesian2D
-from gammaraytoys.sims import (sky_angle_to_offaxis, offaxis_to_sky_angle,
-                               inertial_to_detector_position,
-                               inertial_to_detector_direction,
-                               spacecraft_position)
+from gammaraytoys.coordinates import (Cartesian2D, sky_angle_to_offaxis,
+                                      offaxis_to_sky_angle,
+                                      inertial_to_detector_position,
+                                      inertial_to_detector_direction,
+                                      spacecraft_position)
 
 
 def _km(x, y):
@@ -430,10 +430,11 @@ def test_far_field_photon_direction_is_antiparallel_to_the_line_of_sight():
             assert flight[1] == pytest.approx(-los[1], abs=1e-6)
 
 
-def test_transform_helpers_are_exported_from_the_sims_package():
-    import gammaraytoys.sims as sims
+def test_transform_helpers_are_exported_from_the_coordinates_package():
+    import gammaraytoys.coordinates as coordinates
 
     for name in ('sky_angle_to_offaxis', 'offaxis_to_sky_angle',
                  'inertial_to_detector_position', 'inertial_to_detector_direction',
                  'spacecraft_position'):
-        assert hasattr(sims, name), f"{name} is not exported from gammaraytoys.sims"
+        assert hasattr(coordinates, name), \
+            f"{name} is not exported from gammaraytoys.coordinates"

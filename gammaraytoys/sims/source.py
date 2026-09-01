@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
-from gammaraytoys.coordinates import Cartesian2D
+from gammaraytoys.coordinates import (Cartesian2D, sky_angle_to_offaxis,
+                                      offaxis_to_sky_angle)
 import numpy as np
 import astropy.units as u
 from .event import Photon
 from .spectrum import MonoenergeticSpectrum
-from .transform import sky_angle_to_offaxis, offaxis_to_sky_angle
 from copy import copy
 import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
@@ -273,7 +273,7 @@ class Source(ABC):
             behaves exactly as it did before the inertial simulator existed,
             which is the path the tutorials take. A non-`None` pose puts the
             source in inertial mode: it is aimed through the spacecraft's
-            attitude (see `gammaraytoys.sims.transform`) and its photons are
+            attitude (see `gammaraytoys.coordinates.transform`) and its photons are
             subject to Earth occultation (see `FarFieldSource.occultable`).
         earth : `Earth` or None
             The Earth to test occultation against. Only consulted when
