@@ -80,6 +80,38 @@ def test_run_binned_with_sim_hist_returns_pair(simulator):
     assert np.sum(h_sim.contents) == 50
 
 
+# --- F1: photons with direction < 90 deg must not fall off the Nu axis -----
+#
+# `Nu = 270 deg - direction` is unwrapped: for `direction` in its native
+# `[0, 360)` range (see `Particle.__init__`), `Nu` spans `(-90, 270]` deg,
+# while `offaxis_angle_axis` only covers `[-180, 180]` deg. Any photon with
+# `direction < 90 deg` (equivalently `Nu > 180 deg`) used to fall off the
+# axis and be silently discarded by histpy instead of wrapping around to the
+# same physical angle. `offaxis_angle=200 deg` flies photons at
+# `direction = 70 deg < 90 deg`, landing squarely in the previously-dropped
+# region.
+def test_run_binned_keeps_photons_with_direction_below_90_deg(tracker):
+    source = PointSource(offaxis_angle=200 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1e-3 / u.cm / u.s)
+    sim = Simulator(detector=tracker, sources=source,
+                    reconstructor=SimpleTraditionalReconstructor())
+
+    h_data, h_sim = sim.run_binned(nsim=100, axes='Em', photon_axes=True)
+
+    # None of the thrown photons may be dropped off the Nu axis.
+    assert np.sum(h_sim.contents) == 100
+
+    # They must land at their actual (wrapped) off-axis angle, not vanish.
+    nu_axis = h_sim.axes['Nu']
+    nu_projection = h_sim.project('Nu').contents
+    filled_bins = np.flatnonzero(nu_projection)
+    assert len(filled_bins) > 0
+    assert np.sum(nu_projection[filled_bins]) == 100
+    for i in filled_bins:
+        assert -180 * u.deg <= nu_axis.centers[i] <= 180 * u.deg
+
+
 def test_measured_energy_axis_setter_preserves_scale(simulator):
     simulator.measured_energy_axis = np.geomspace(.1, 10, 5) * u.MeV
 

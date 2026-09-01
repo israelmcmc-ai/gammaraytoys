@@ -34,8 +34,8 @@ from gammaraytoys.sims import (Earth, InertialSimulator, IsotropicSource,
 # --- geometry constants, fixed here rather than taken from astropy -------
 #
 # An explicit Earth radius keeps rho hand-computable:
-#     rho = arcsin(6371 / 6771) = 1.226118 rad = 70.2513 deg
-#     rho / pi = 0.390281
+#     rho = arcsin(6371 / 6771) = 1.225350 rad = 70.2074 deg
+#     rho / pi = 0.390041
 EARTH_RADIUS = 6371.0 * u.km
 ORBIT_RADIUS = 6771.0 * u.km
 
@@ -168,7 +168,7 @@ class _NonOccultablePointSource(PointSource):
 # geometric correction. Half an orbit starting at theta = 0 puts nadir in
 # [180, 360) deg while the source sits at lambda = 90 deg, so the smallest
 # source-to-nadir separation anywhere in the run is 90 deg -- comfortably
-# outside rho = 70.25 deg.
+# outside rho = 70.2074 deg.
 
 CLEAN_MU = 1500.0
 CLEAN_NINTERVALS = 250
@@ -274,7 +274,7 @@ def test_circular_orbit_occults_a_point_source_for_the_analytic_rho_over_pi():
     # orbital plane, so this is the generic case: over a full circular orbit
     # nadir sweeps all 360 deg uniformly in time, and the source is blocked
     # whenever nadir passes within rho of it -- an arc of 2 rho out of 2 pi,
-    # i.e. a fraction rho/pi = 0.3903.
+    # i.e. a fraction rho/pi = 0.3900.
     earth = _make_earth()
     detector = _make_tracker()
 
@@ -293,7 +293,7 @@ def test_circular_orbit_occults_a_point_source_for_the_analytic_rho_over_pi():
 
     # (ii) the simulator must reject exactly that fraction of its photons.
     #      mu = 1500 photons drawn from the *unocculted* mean; expected
-    #      survivors 1500 * 0.6097 = 914.6, sigma = 30.2 (thinned Poisson is
+    #      survivors 1500 * 0.6100 = 914.9, sigma = 30.2 (thinned Poisson is
     #      still Poisson), 4 sigma = +-121.  No occultation at all would sit
     #      at 1500, which is 19 sigma away.
     mu = 1500.0
@@ -318,7 +318,7 @@ def test_isotropic_source_loses_the_earth_disc_fraction_of_its_photons():
     # sweeping past it), and at a single frozen pose rather than over an
     # orbit. `IsotropicSource` "comes along for free" per PR 3.
     #
-    # mu = 800, expected survivors 800 * 0.6097 = 487.8, sigma = 22.1,
+    # mu = 800, expected survivors 800 * 0.6100 = 488.0, sigma = 22.1,
     # 4 sigma = +-88. No occultation would sit at 800, i.e. 14 sigma away.
     earth = _make_earth()
     detector = _make_tracker()
@@ -411,7 +411,7 @@ def test_isotropic_source_occultation_wedge_is_centred_on_attitude_minus_nadir()
 #
 # A sixth of an orbit sweeps theta from 0 to 60 deg, so nadir stays in
 # [180, 240) deg. A source at lambda = 180 deg is then never further than
-# 60 deg from nadir, and rho = 70.25 deg, so it is behind the Earth for the
+# 60 deg from nadir, and rho = 70.2074 deg, so it is behind the Earth for the
 # whole run.
 
 FULLY_OCCULTED_SKY_ANGLE = 180 * u.deg

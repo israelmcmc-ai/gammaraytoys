@@ -1,5 +1,6 @@
 from histpy import Histogram, Axes, Axis
 from astropy import units as u
+from astropy.coordinates import Angle
 import numpy as np
 
 
@@ -252,7 +253,7 @@ class SimulatorBase:
 
             if sim_hist:
                 photon_data = {'Ei': sim_event.energy,
-                               'Nu': 270*u.deg - sim_event.direction,
+                               'Nu': Angle(270*u.deg - sim_event.direction).wrap_at(180*u.deg),
                                'k': sim_event.chirality}
 
                 photon_data = [photon_data[k] for k in photon_axes.labels]
