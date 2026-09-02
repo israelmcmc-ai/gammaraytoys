@@ -154,6 +154,16 @@ Carried forward until answered; they shape later PRs.
 - **CI executes `docs/examples/cosimita/*.ipynb`** in a `notebooks` job after `test`.
   Every future PR's notebooks must run clean from a fresh kernel. It is a smoke check,
   to be replaced by lightweight unit tests eventually.
+- **`progress = True` on `run_events` and `run_binned`** for both simulators, forwarded
+  to tqdm's `disable`. **Every cosimita notebook must pass `progress = False`**: tqdm
+  writes one stream record per refresh and nbconvert stores all of them, which was 149
+  frames each in notebooks 00 and 02. Do *not* reach for `TQDM_DISABLE` instead -- tqdm
+  binds it at import time, so it only works from a cell running before the first
+  `gammaraytoys` import and breaks silently if cells are reordered.
+- **Re-execute notebooks with the inline backend, never `MPLBACKEND=Agg`.** Agg
+  overrides the inline backend, so `--execute --inplace` silently strips every figure
+  from the committed `.ipynb` while exiting 0. The CI job sets Agg deliberately, which
+  is fine there because it discards output via `--stdout`.
 
 ## Known issues — all three now resolved
 
