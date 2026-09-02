@@ -39,7 +39,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
-| 4 | `NearPointSource`, `ExtendedSource` | `claude/cosimita-pr4-near-and-extended-sources` | Implementer running |
+| 4 | `NearPointSource`, `ExtendedSource` | `claude/cosimita-pr4-near-and-extended-sources` | **Open as PR #17**, awaiting maintainer review. 345 tests |
 | 5 | `EarthAlbedoSource` | — | Not started |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
 | 7 | YAML configuration | — | Not started |
@@ -169,6 +169,26 @@ Carried forward until answered; they shape later PRs.
   from the committed `.ipynb` while exiting 0. The CI job sets Agg deliberately, which
   is fine there because it discards output via `--stdout`.
 
+## Landed in PR 4, beyond the plan
+
+- **`NearFieldSource.plot` now expands the axes limits.** PR 1 wrote it without the
+  `_expand_axes_limits` call every far-field plot method makes, so a near source
+  beyond `1.5 a` was drawn off-screen and vanished silently. PR 4 is what made the
+  `s >= a` branch reachable, so it is fixed there.
+- **`ExtendedSource` validates `width`.** `kappa = 1/width**2` above ~1e15 sends
+  `scipy.stats.vonmises.rvs` into a rejection loop that never accepts, inside compiled
+  code, so the process hangs and cannot be interrupted. `width = 0` reaches it, and the
+  docstring's "at very small width this behaves like a PointSource" invites exactly
+  that. PRs 5-7 adding any other sampled distribution should validate the same way.
+- **Both new sources emit `direction` in degrees.** `Particle` preserves whatever unit
+  it is handed, so a radian direction is visible downstream in `EventList.write`.
+
+## Known issue, pre-existing, awaiting its own PR
+
+- **`PointSource`'s chirality flip can be deleted with the whole suite green.** Found
+  while mutation-testing PR 4; the code is PR 1-era, so it was left out of scope there.
+  `NearPointSource`'s equivalent is covered.
+
 ## Known issues — all three now resolved
 
 - **`run_binned` dropped ~8.5% of an inertial run.** It filled `Nu = 270 deg - direction`
@@ -252,6 +272,23 @@ Carried forward until answered; they shape later PRs.
    git merge-base --is-ancestor "$h" main && git worktree remove --force "$wt"; done`
   Do this at the start of each PR. Check for unmerged worktrees first -- `pr2-fixes`
   is deliberately kept.
+- **A one-sided assertion can be *reinforced* by the bug it should catch.** PR 4's
+  "a near source at the centre triggers far more often than one far outside" only
+  required the far source to trigger rarely -- so breaking its aim entirely, which
+  makes it trigger even less, strengthened the assertion instead of failing it. Ask of
+  every comparison test: does the bug I fear push this quantity toward the assertion or
+  away from it?
+- **A test helper must not invert the transform under test.** PR 4's sky-angle helper
+  recovered `lambda` with `offaxis_to_sky_angle(..., pose.attitude)`, the exact inverse
+  of the `sky_angle_to_offaxis(..., pose.attitude)` the code had just applied. Both are
+  `A - x`, so the round trip cancelled any attitude error and the source could ignore
+  attitude entirely with the suite green. Derive the expectation from the raw output
+  (`photon.direction`), not by undoing the computation.
+- **Isolating one effect can delete the effect you meant to test.** Every PR 4
+  `ExtendedSource` test used a 1 m Earth so nothing was ever occulted -- which made
+  occultation deletable outright with the suite green. When a fixture switches
+  something off to isolate something else, check that the thing switched off is still
+  tested somewhere.
 - **Compare a new source's speed against the sibling that does the same work.** PR 4's
   implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
   believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
