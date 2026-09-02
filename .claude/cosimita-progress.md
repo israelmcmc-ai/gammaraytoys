@@ -18,12 +18,16 @@ Per PR, three agents with separate roles:
 | Test author | Sonnet | First-principles tests. **Must derive expected values from the plan's formulas, never from running the code.** |
 | Reviewer | Opus | Reviews implementation + tests against the plan and its §8 traps. |
 
-From PR 3 onward the implementer and test author run **concurrently**, both working
-from one written API contract given to both, on **separate branches**
-(`...-pr3-inertial-simulator` and `...-pr3-tests`) so their independence is auditable
-and there is no push race. The test author reconciles at the end by merging the
-implementer's branch and running; a disagreement is a finding to report, never
-something to resolve by weakening the test.
+PR 3 ran the implementer and test author **concurrently**, on separate branches, both
+working from one written API contract, so their independence was auditable. It paid off
+(303/307 passed on reconciliation, and the 4 failures were all test-fixture bugs).
+
+**PR 4 reverts to the simpler sequential flow** -- implementer, then test author, then
+reviewer -- agreed with the maintainer on the grounds that PR 4's two sources are far
+more mechanical than PR 3's frame algebra. The test author still works from the written
+contract and from independently derived numbers, never from the implementation, and a
+disagreement is still a finding to report rather than something to resolve by weakening
+the test.
 
 The orchestrator independently re-verifies every claim before opening a PR, including
 mutation-testing the new tests by injecting deliberate bugs.
@@ -34,8 +38,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 |---|---|---|---|
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
-| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` | **Open as PR #15**, awaiting maintainer review. Review comments applied; `main` merged in; 315 tests |
-| 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
+| 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
+| 4 | `NearPointSource`, `ExtendedSource` | `claude/cosimita-pr4-near-and-extended-sources` | Implementer running |
 | 5 | `EarthAlbedoSource` | — | Not started |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
 | 7 | YAML configuration | — | Not started |
