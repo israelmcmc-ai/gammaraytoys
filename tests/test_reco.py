@@ -1,3 +1,5 @@
+import warnings
+
 import astropy.units as u
 import numpy as np
 
@@ -67,6 +69,40 @@ def test_reconstruct_triggered_two_hits():
     # Whether or not the CDS is physical for this made-up pair, reconstruct
     # must return a RecoCompton and never raise
     assert isinstance(result, RecoCompton)
+
+
+def test_reconstruct_untriggered_when_all_hits_in_top_layer():
+    # Regression test: two (or more) hits, all in layer 0, used to still
+    # trigger -- `position_bottom = np.mean(hits.position[hits.layer > 0])`
+    # then averaged an empty selection, giving psi = nan while the event
+    # was reported as triggered.
+    reco = SimpleTraditionalReconstructor()
+
+    hits = _make_hits([0, 0], [(0, 10), (0.5, 10)], [0.65, 0.34])
+    sim_event = _FakeSimEvent(hits)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = reco.reconstruct(sim_event)
+
+    assert not result.triggered
+    assert result.psi is None
+
+
+def test_reconstruct_triggered_top_and_bottom_gives_finite_psi():
+    # Regression guard: the layer > 0 requirement must not be too strict --
+    # an ordinary top-then-bottom event still triggers with a finite psi.
+    reco = SimpleTraditionalReconstructor()
+
+    hits = _make_hits([0, 1], [(0, 10), (0, 0)], [0.65, 0.34])
+    sim_event = _FakeSimEvent(hits)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = reco.reconstruct(sim_event)
+
+    assert result.triggered
+    assert np.isfinite(result.psi)
 
 
 def test_recocompton_untriggered_by_default():

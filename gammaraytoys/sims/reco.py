@@ -11,13 +11,21 @@ class Reconstructor(ABC):
 class SimpleTraditionalReconstructor(Reconstructor):
     """
     Top layer is index 0. Assume only another bottom layer composed by everything else.
+
+    Triggering requires at least one hit in the top layer (index 0) and at
+    least one hit below it (layer > 0), since `psi` is reconstructed from
+    the lever arm between a top hit and the mean position of the
+    below-top hits -- an event with every hit confined to layer 0 has no
+    such lever arm.
     """
-    
+
     def reconstruct(self, sim_event):
 
         hits = sim_event.hits
 
-        triggered = hits.nhits >= 2 and hits.layer[0] == 0
+        triggered = (hits.nhits >= 2
+                     and hits.layer[0] == 0
+                     and np.any(hits.layer > 0))
 
         if not triggered:
             # Didn't meet our trigger condition

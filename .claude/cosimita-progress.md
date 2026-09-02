@@ -34,7 +34,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 |---|---|---|---|
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
-| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` (+ `-tests`) | **In progress** — implementer and test author running concurrently |
+| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` | Implemented, tested, reviewed, fixed — 312 tests; notebook in progress |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
 | 5 | `EarthAlbedoSource` | — | Not started |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
@@ -124,6 +124,41 @@ Carried forward until answered; they shape later PRs.
   axes limits to +-1.5x the surrounding radius. Anything drawn on top must use cm and
   must expand those limits, or it lands in the wrong place or off-screen -- silently,
   in both cases.
+
+## Landed in PR 3, beyond the plan
+
+- **`random_photon(detector, pose = None, earth = None)`** — see the plan's §5.3 note.
+  PRs 4-7 must write their sources against this three-parameter signature.
+- **`SimulatorBase`** — shared base for `Simulator` and `InertialSimulator`, holding
+  `_simulate_one`, the six CDS axis properties and `_run_binned`. Verified
+  bit-identical output for `Simulator` against `main` by seeded comparison.
+- **`PointSource` takes either `offaxis_angle` or `sky_angle`**, mutually exclusive.
+  A `sky_angle` source **mutates `self.offaxis_angle` on every draw** — do not share
+  one instance between two runs, and PR 7's config loader must not hand the same
+  source object to two simulators.
+- **`InertialSimulator` validates the Earth at construction.** A mismatched Earth
+  used to silently disable occultation entirely (1137 occulted -> 0), because
+  `_is_occulted` does no validation and `arcsin(R/r)` goes `nan`.
+
+## Known issues, each awaiting its own PR
+
+- **`run_binned` drops ~8.5% of an inertial run.** It fills `Nu = 270 deg - direction`
+  while `direction` is wrapped to `[0,360)`, giving `Nu` in `(-90, 270]` against an
+  axis of `[-180, 180]`; everything with `direction < 90 deg` falls off and histpy
+  drops it with a warning. Pre-existing and byte-identical on `main`, but the inertial
+  simulator sweeps the whole sky, so it is now routine. Fixing it changes `Simulator`
+  output, hence its own PR.
+- **`SimpleTraditionalReconstructor` returns `triggered = True` with `psi = nan`**
+  when every hit is in layer 0. Measured at 0.19% of triggers in the uniform-stack
+  fixture and 0% in COMPTELito. **Verified mechanism**: the photon Comptons in layer 0
+  (recorded), deposits below `energy_threshold` in a nearby layer (so no hit is
+  recorded), backscatters, and interacts in layer 0 again -- giving recorded hits
+  `[0, 0]` with an invisible step between them. Sub-threshold deposits of 6.9-10.0 keV
+  against a 20 keV threshold were seen in all three sampled events. The cached
+  responses use the COMPTELito geometry, where the rate is zero, so a fix does **not**
+  require regenerating them.
+- **A stale comment**: `tests/test_inertial_simulator.py`'s module docstring says
+  `rho = arcsin(6371/6771) = 70.2513 deg`; the true value is `70.2074 deg`.
 
 ## Carried into PR 3
 
