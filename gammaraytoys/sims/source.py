@@ -779,7 +779,68 @@ class NearFieldSource(Source):
                self.position.y.to_value(length_unit),
                **style)
 
+        # `ToyTracker2D.plot()` sizes its axes to 1.5x its own surrounding
+        # circle, so a near source further out than that -- most of the
+        # `s >= a` branch -- lands outside the visible axes and vanishes
+        # without any warning. Grow the limits to reach it, exactly as the
+        # far-field plot methods do for the sky circle.
+        center = detector.surrounding_circle_center
+        offset = np.hypot((self.position.x - center.x).to_value(length_unit),
+                          (self.position.y - center.y).to_value(length_unit))
+        _expand_axes_limits(ax, center, offset * length_unit, length_unit)
+
         return ax
+
+# Above this concentration `scipy.stats.vonmises.rvs` stops terminating: its
+# rejection sampler effectively never accepts, and the loop is inside compiled
+# code, so the process cannot even be interrupted. kappa = 1/width**2, so this
+# is reached at a width of about 1e-8 deg -- far narrower than any physically
+# meaningful source, and exactly what a reader gets by taking the docstring's
+# "at very small width this behaves like a PointSource" literally and passing 0.
+_MAX_VON_MISES_KAPPA = 1e15
+
+
+def _von_mises_kappa(width):
+    """
+    Convert a `width` to a von Mises concentration, rejecting values that
+    would hang the sampler.
+
+    Parameters
+    ----------
+    width : `astropy.units.Quantity`
+        Angular width (the sigma a user thinks in).
+
+    Returns
+    -------
+    float
+        `kappa = 1 / width**2`, with `width` in radians.
+
+    Raises
+    ------
+    ValueError
+        If `width` is not strictly positive, or is so small that
+        `scipy.stats.vonmises` would not terminate. Use `PointSource` for a
+        source that narrow.
+    """
+
+    width_rad = width.to_value(u.rad)
+
+    if not width_rad > 0:
+        raise ValueError(
+            f"ExtendedSource needs a strictly positive width, got {width}. "
+            "For a source at a single exact direction use PointSource.")
+
+    kappa = 1 / width_rad**2
+
+    if kappa > _MAX_VON_MISES_KAPPA:
+        raise ValueError(
+            f"width = {width} is too narrow to sample: it gives a von Mises "
+            f"concentration of {kappa:.3g}, above the {_MAX_VON_MISES_KAPPA:.0e} "
+            "at which scipy's sampler stops terminating. Use PointSource, "
+            "which this source reproduces in that limit anyway.")
+
+    return kappa
+
 
 class PointSource(FarFieldSource):
     """
@@ -1267,7 +1328,12 @@ class NearPointSource(NearFieldSource):
             photon then picks its own chirality at random.
         """
 
-        self._position = position
+        # Copied rather than aliased: `NearPointSource(position =
+        # detector.surrounding_circle_center)` is a natural thing to write, and
+        # that hands over the detector's own centre object. Nothing mutates it
+        # today, but sharing it means a future in-place edit would silently move
+        # the detector's geometry.
+        self._position = Cartesian2D(position.x, position.y)
         self._spectrum = spectrum
         self._rate = rate
         self.chirality = chirality
@@ -1376,7 +1442,11 @@ class NearPointSource(NearFieldSource):
             direction = np.random.uniform(0, 360) * u.deg
         else:
             offset_rad = np.random.uniform(-self._half_width_rad, self._half_width_rad)
-            direction = (self._aim_angle_rad + offset_rad) * u.rad
+            # Converted to degrees so both branches -- and every other source
+            # in the package -- hand back the same unit. `Particle.__init__`
+            # preserves whatever unit it is given, so leaving this in radians
+            # is visible downstream, e.g. in `EventList.write` output.
+            direction = ((self._aim_angle_rad + offset_rad) * u.rad).to(u.deg)
 
         chirality = copy(self.chirality)
         if chirality is not None:
@@ -1494,6 +1564,11 @@ class ExtendedSource(FarFieldSource):
         self.chirality_degree = chirality_degree
         self._flux = flux
 
+        # Validate eagerly, so a bad width raises where it was set rather
+        # than on the first draw. `width` is public and mutable, so
+        # `random_photon` re-validates on every draw as well.
+        _von_mises_kappa(self.width)
+
         # A single point source, re-aimed to a new off-axis angle for every
         # photon, rather than a throw-away PointSource per photon (as
         # IsotropicSource does). Built in detector-frame mode
@@ -1581,17 +1656,21 @@ class ExtendedSource(FarFieldSource):
         # above, so a `width` changed after construction (or after an
         # earlier draw) takes effect immediately -- there is no stale
         # cached value from `__init__` to fall out of sync with it.
-        kappa = 1 / self.width.to_value(u.rad)**2
+        kappa = _von_mises_kappa(self.width)
         sky_angle_rad = vonmises.rvs(kappa, loc = self.sky_angle.to_value(u.rad))
         sky_angle = sky_angle_rad * u.rad
+
+        # Recorded before the occultation test, so that an interval in which
+        # every photon happens to be occulted still leaves `plot` showing this
+        # pose rather than the previous one. `PointSource` does the same.
+        self._last_attitude = pose.attitude
+        self._aimed = True
 
         if self._occulted(sky_angle, pose, earth):
             return None
 
         offaxis_angle = sky_angle_to_offaxis(sky_angle, pose.attitude)
         self._point_source.offaxis_angle = offaxis_angle
-        self._aimed = True
-        self._last_attitude = pose.attitude
 
         return self._point_source.random_photon(detector = detector)
 
@@ -1653,6 +1732,6 @@ class ExtendedSource(FarFieldSource):
         self.plot_sky_circle(ax, detector)
         self.plot_sky_arc(ax, detector,
                           center_angle = center_angle,
-                          extent = 4 * self.width, **kwargs)
+                          extent = min(4 * self.width, 360*u.deg), **kwargs)
 
         return ax
