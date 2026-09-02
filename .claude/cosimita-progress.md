@@ -34,11 +34,17 @@ mutation-testing the new tests by injecting deliberate bugs.
 |---|---|---|---|
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
-| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` | Implemented, tested, reviewed, fixed — 312 tests; notebook in progress |
+| 3 | `InertialSimulator`, transforms, occultation | `claude/cosimita-pr3-inertial-simulator` | **Open as PR #15**, awaiting maintainer review. Review comments applied; `main` merged in; 315 tests |
 | 4 | `NearPointSource`, `ExtendedSource` | — | Not started |
 | 5 | `EarthAlbedoSource` | — | Not started |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
 | 7 | YAML configuration | — | Not started |
+
+Side PRs, outside the seven:
+
+| PR | Scope | State |
+|---|---|---|
+| #16 | `SimpleTraditionalReconstructor` trigger guard (`and np.any(hits.layer > 0)`) | **Merged** |
 
 Branch naming: `claude/cosimita-prN-<topic>`, always cut from `main`.
 
@@ -139,35 +145,51 @@ Carried forward until answered; they shape later PRs.
 - **`InertialSimulator` validates the Earth at construction.** A mismatched Earth
   used to silently disable occultation entirely (1137 occulted -> 0), because
   `_is_occulted` does no validation and `arcsin(R/r)` goes `nan`.
+- **`transform.py` lives in `gammaraytoys/coordinates/`, not `sims/`** -- it is frame
+  algebra, not simulation. The `sims` re-export was dropped, so import it from
+  `gammaraytoys.coordinates.transform`.
+- **`SpacecraftHistory.intervals(tstart, tstop)` owns the window clipping** and the
+  livetime rescale `live * (hi-lo)/(stop-start)`, moved out of the simulator. PRs 4-7
+  get clipped intervals for free and must not re-implement it.
+- **CI executes `docs/examples/cosimita/*.ipynb`** in a `notebooks` job after `test`.
+  Every future PR's notebooks must run clean from a fresh kernel. It is a smoke check,
+  to be replaced by lightweight unit tests eventually.
 
-## Known issues, each awaiting its own PR
+## Known issues — all three now resolved
 
-- **`run_binned` drops ~8.5% of an inertial run.** It fills `Nu = 270 deg - direction`
+- **`run_binned` dropped ~8.5% of an inertial run.** It filled `Nu = 270 deg - direction`
   while `direction` is wrapped to `[0,360)`, giving `Nu` in `(-90, 270]` against an
-  axis of `[-180, 180]`; everything with `direction < 90 deg` falls off and histpy
-  drops it with a warning. Pre-existing and byte-identical on `main`, but the inertial
-  simulator sweeps the whole sky, so it is now routine. Fixing it changes `Simulator`
-  output, hence its own PR.
-- **`SimpleTraditionalReconstructor` returns `triggered = True` with `psi = nan`**
+  axis of `[-180, 180]`; everything with `direction < 90 deg` fell off and histpy
+  dropped it with a warning. **Fixed in PR 3** with `Angle(...).wrap_at(180 deg)`, at
+  the maintainer's direction. Pre-existing and byte-identical on `main`; no cached
+  response was affected, because every `photon_axes` use that feeds an `.h5` passes
+  `'Ei'`, never `'Nu'`.
+- **`SimpleTraditionalReconstructor` returned `triggered = True` with `psi = nan`**
   when every hit is in layer 0. Measured at 0.19% of triggers in the uniform-stack
   fixture and 0% in COMPTELito. **Verified mechanism**: the photon Comptons in layer 0
   (recorded), deposits below `energy_threshold` in a nearby layer (so no hit is
   recorded), backscatters, and interacts in layer 0 again -- giving recorded hits
   `[0, 0]` with an invisible step between them. Sub-threshold deposits of 6.9-10.0 keV
-  against a 20 keV threshold were seen in all three sampled events. The cached
-  responses use the COMPTELito geometry, where the rate is zero, so a fix does **not**
-  require regenerating them.
-- **A stale comment**: `tests/test_inertial_simulator.py`'s module docstring says
-  `rho = arcsin(6371/6771) = 70.2513 deg`; the true value is `70.2074 deg`.
+  against a 20 keV threshold were seen in all three sampled events. **Fixed in PR #16**
+  (merged) by requiring `np.any(hits.layer > 0)`. The cached responses use COMPTELito,
+  where the rate is zero, so they were **not** regenerated; a note in
+  `docs/tutorials/compton_telescopes/data/README.md` records this, to be removed if
+  they are ever regenerated.
+- **A stale comment** in `tests/test_inertial_simulator.py`'s module docstring
+  (`rho = 70.2513 deg`, true value `70.2074 deg`). **Fixed in PR 3**, along with six
+  further constants arithmetically descended from it.
 
 ## Carried into PR 3
 
-- **`is_occulted` costs 140 us/call** vs 0.5 us for the plain-float equivalent (277x),
-  because it does Quantity arithmetic per photon and recomputes `arcsin(R_E/r)` every
-  call although it is constant per interval. That is 22% of `random_photon` -- inside
-  the plan's 50% budget, but exactly the pattern SS3.5 warns about. Hoist `nadir` and
-  `rho` to floats once per interval and unit-test the fast path against `is_occulted`
-  so the two cannot drift.
+- **`is_occulted` is dominated by Quantity arithmetic**, done per photon, and it
+  recomputes `arcsin(R_E/r)` every call although it is constant per interval. That is
+  exactly the pattern SS3.5 warns about. **Done in PR 3**: a private `_is_occulted`
+  fast path taking plain floats, unit-tested against the public method so the two
+  cannot drift. Measured at **1.8 us against 23.9 us**, roughly **13x**.
+  *Earlier figures in this file and in PR 3's first description (277x, 26x) were
+  wrong* -- they compared the old public path against a hand-written float snippet
+  rather than against the method as shipped. Repeat measurements of the real pair
+  land in the 11-13x range; absolute numbers move with machine load.
 - **`attitude` and `orbit_angle` are unwrapped past 360 deg** (matching the plan's own
   SS4.1 example). PR 3's `Nu = A - lambda` owns the wrapping; PR 2 does none.
 - **`occultable`** is being added in PR 3, default `True`; PR 5's `EarthAlbedoSource`
@@ -198,6 +220,16 @@ Carried forward until answered; they shape later PRs.
   the specific bug their test targets and show it fails.
 - **The reviewer slot earns its cost.** Review found real defects in both wave-1 PRs
   that implementation, testing and orchestrator verification had all missed.
+- **A green suite says nothing about the notebooks.** pytest never imports one, so
+  moving `transform.py` broke notebook 02's very first import with all 313 tests
+  passing, and notebook 00 sat broken on the PR 3 branch (`DemoNearFieldSource.
+  random_photon` never grew the `earth` parameter) through several rounds of review.
+  Hence the CI job. Until a PR's notebooks have actually been executed, they are
+  unverified.
+- **Verify against the code under review, not whatever is installed.** A scratch venv
+  whose editable install still pointed at the `main` checkout made a notebook run look
+  like evidence for a branch it never touched. Confirm `package.__file__` resolves
+  inside the worktree before believing any run.
 - **Agents must commit and push as soon as work is done**, not after polishing: a rate
   limit killed one agent mid-task and lost the entire round.
 - **`git push` can fail transiently with `could not read Username`** while `git fetch`
