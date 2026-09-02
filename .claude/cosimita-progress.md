@@ -244,6 +244,23 @@ Carried forward until answered; they shape later PRs.
   whose editable install still pointed at the `main` checkout made a notebook run look
   like evidence for a branch it never touched. Confirm `package.__file__` resolves
   inside the worktree before believing any run.
+- **Reclaim agent worktrees between PRs.** Each carries an ~800 MB-1 GB `.venv`; by the
+  end of PR 3 there were 29 stale ones holding 22 GB, and PR 4's implementer hit a full
+  disk (135 MB free) before it could install anything. Removing every worktree whose
+  HEAD is an ancestor of `main` freed 20 GB and touched no branch ref:
+  `for wt in .claude/worktrees/*/; do h=$(git -C "$wt" rev-parse HEAD); \
+   git merge-base --is-ancestor "$h" main && git worktree remove --force "$wt"; done`
+  Do this at the start of each PR. Check for unmerged worktrees first -- `pr2-fixes`
+  is deliberately kept.
+- **Compare a new source's speed against the sibling that does the same work.** PR 4's
+  implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
+  believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
+  `offaxis_angle` never re-aims, so its throwing-plane cache never misses. Against
+  `IsotropicSource`, which re-aims every photon exactly as `ExtendedSource` does, and
+  with occultation controlled to ~0% on both so neither gets cheap early-outs, it is
+  585 us vs 540 us -- **+8.3%**. Control the occultation rate before comparing: an
+  occulted draw returns before the expensive throwing-plane call and silently
+  cheapens whichever source is more occulted at the chosen pose.
 - **Agents must commit and push as soon as work is done**, not after polishing: a rate
   limit killed one agent mid-task and lost the entire round.
 - **`git push` can fail transiently with `could not read Username`** while `git fetch`
