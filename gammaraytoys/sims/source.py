@@ -1428,17 +1428,20 @@ class ExtendedSource(FarFieldSource):
     Von Mises rather than a (truncated) Gaussian because it wraps around the
     sky by construction: no truncation parameter is needed, there is no
     double-counting near `360 deg`, and it is exactly normalized over the
-    circle. `width` is the sigma a user thinks in; internally it is
-    converted to the von Mises concentration `kappa = 1 / width_rad**2`
-    (`width` in radians), which is exact only in the small-width limit --
-    for a large `width` the von Mises distribution is measurably wider than
-    a Gaussian of the same nominal sigma would be, and in the `kappa -> 0`
-    limit it becomes the uniform (isotropic) distribution rather than an
-    ever-wider Gaussian. `flux` is the total flux integrated over the whole
-    sky, matching `IsotropicSource` and `PointSource`: at very small `width`
-    this source reproduces a `PointSource` at the same `flux` and
-    `sky_angle`, and at very large `width` it reproduces an `IsotropicSource`
-    at the same `flux`.
+    circle. `width` is the sigma a user thinks in; it is converted to the
+    von Mises concentration `kappa = 1 / width_rad**2` (`width` in radians)
+    freshly on every draw, in `random_photon` -- so, like `sky_angle`,
+    `chirality` and `chirality_degree`, changing `width` after construction
+    takes effect on the very next photon, with no stale cached value left
+    over from `__init__`. The conversion is exact only in the small-width
+    limit -- for a large `width` the von Mises distribution is measurably
+    wider than a Gaussian of the same nominal sigma would be, and in the
+    `kappa -> 0` limit it becomes the uniform (isotropic) distribution
+    rather than an ever-wider Gaussian. `flux` is the total flux integrated
+    over the whole sky, matching `IsotropicSource` and `PointSource`: at
+    very small `width` this source reproduces a `PointSource` at the same
+    `flux` and `sky_angle`, and at very large `width` it reproduces an
+    `IsotropicSource` at the same `flux`.
 
     Like `PointSource(sky_angle = ...)`, this is an inertial source: it
     needs a spacecraft pose to have a detector-frame direction at all, and
@@ -1491,8 +1494,6 @@ class ExtendedSource(FarFieldSource):
         self.chirality_degree = chirality_degree
         self._flux = flux
 
-        self._kappa = 1 / self.width.to_value(u.rad)**2
-
         # A single point source, re-aimed to a new off-axis angle for every
         # photon, rather than a throw-away PointSource per photon (as
         # IsotropicSource does). Built in detector-frame mode
@@ -1505,10 +1506,15 @@ class ExtendedSource(FarFieldSource):
                                          chirality = chirality,
                                          chirality_degree = chirality_degree)
 
-        # Whether `_point_source.offaxis_angle` reflects a real draw at a
-        # real pose yet, for `plot` -- distinct from the placeholder 0 deg
-        # it starts at above.
+        # Whether this source has been evaluated at a real pose yet, and
+        # (if so) the attitude of the last such pose -- both for `plot`,
+        # which has no pose of its own. The attitude, not the last drawn
+        # photon's off-axis angle, is what `plot` needs: `_point_source
+        # .offaxis_angle` after a draw is a von Mises *sample*, jittering
+        # around the source's true centre from photon to photon, not the
+        # centre itself.
         self._aimed = False
+        self._last_attitude = None
 
     @property
     def spectrum(self):
@@ -1571,7 +1577,12 @@ class ExtendedSource(FarFieldSource):
         self._point_source.chirality = self.chirality
         self._point_source.chirality_degree = self.chirality_degree
 
-        sky_angle_rad = vonmises.rvs(self._kappa, loc = self.sky_angle.to_value(u.rad))
+        # kappa is recomputed from `width` on every draw, like the resync
+        # above, so a `width` changed after construction (or after an
+        # earlier draw) takes effect immediately -- there is no stale
+        # cached value from `__init__` to fall out of sync with it.
+        kappa = 1 / self.width.to_value(u.rad)**2
+        sky_angle_rad = vonmises.rvs(kappa, loc = self.sky_angle.to_value(u.rad))
         sky_angle = sky_angle_rad * u.rad
 
         if self._occulted(sky_angle, pose, earth):
@@ -1580,6 +1591,7 @@ class ExtendedSource(FarFieldSource):
         offaxis_angle = sky_angle_to_offaxis(sky_angle, pose.attitude)
         self._point_source.offaxis_angle = offaxis_angle
         self._aimed = True
+        self._last_attitude = pose.attitude
 
         return self._point_source.random_photon(detector = detector)
 
@@ -1589,10 +1601,15 @@ class ExtendedSource(FarFieldSource):
         `detector.plot()`.
 
         Draws the sky circle (`plot_sky_circle`) and an arc
-        (`plot_sky_arc`) centred on this source's current detector-frame
-        off-axis angle, spanning `4 * width` (i.e. `+-2` sigma, the
-        small-width Gaussian-limit central ~95% interval; not exact for a
-        wide `width`, but a reasonable visual indicator either way).
+        (`plot_sky_arc`) centred on this source's *distribution centre* --
+        `sky_angle_to_offaxis(sky_angle, attitude)` at the attitude of the
+        last pose a photon was drawn at -- spanning `4 * width` (i.e. `+-2`
+        sigma, the small-width Gaussian-limit central ~95% interval; not
+        exact for a wide `width`, but a reasonable visual indicator either
+        way). The centre is deliberately *not*
+        `self._point_source.offaxis_angle`: after a draw that is a von
+        Mises *sample*, which jitters from photon to photon and would make
+        the plotted arc jump around the true centre rather than showing it.
 
         The plot is in the detector frame, so this inertial source can only
         be drawn once it has been aimed at a pose -- i.e. after at least
@@ -1631,9 +1648,11 @@ class ExtendedSource(FarFieldSource):
                 "at a spacecraft pose yet, so it has no detector-frame "
                 "off-axis angle to plot. Draw a photon with a pose first.")
 
+        center_angle = sky_angle_to_offaxis(self.sky_angle, self._last_attitude)
+
         self.plot_sky_circle(ax, detector)
         self.plot_sky_arc(ax, detector,
-                          center_angle = self._point_source.offaxis_angle,
+                          center_angle = center_angle,
                           extent = 4 * self.width, **kwargs)
 
         return ax
