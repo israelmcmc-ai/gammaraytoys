@@ -891,3 +891,86 @@ def test_sky_angle_source_raises_when_used_without_a_pose():
         source.random_photon(detector)
 
     assert 'pose' in str(excinfo.value).lower()
+
+
+# --- the progress bar -----------------------------------------------------
+#
+# tqdm writes one stream record per refresh, and nbconvert stores every one
+# of them in the committed `.ipynb`. `progress = False` turns the bar off so
+# the cosimita notebooks stay reviewable. The bar is presentation only: it
+# must not touch the simulation, so the same seed must give the same run
+# either way.
+
+# Sentinel for "call `run_events` without the keyword at all", so the
+# default can actually be exercised. Passing `progress=True` explicitly
+# would leave a flipped default undetected.
+_DEFAULT = object()
+
+
+def _run_capturing_stderr(capsys, progress):
+    """Run a short simulation and return `(events, captured_stderr)`.
+
+    `progress` is passed straight through to `run_events`, unless it is
+    `_DEFAULT`, in which case the keyword is omitted entirely and the
+    signature's own default applies. tqdm writes to stderr, so that is where
+    the bar shows up (or does not).
+    """
+
+    earth = _make_earth()
+    detector = _make_tracker()
+    history = _make_history(duration=600 * u.s, n_intervals=20, earth=earth)
+
+    source = PointSource(sky_angle=CLEAN_SKY_ANGLE,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=_flux_for_expected_counts(200.0, detector,
+                                                        history.total_livetime))
+
+    simulator = InertialSimulator(detector=detector,
+                                  sources=source,
+                                  reconstructor=SimpleTraditionalReconstructor(),
+                                  spacecraft_history=history,
+                                  earth=earth)
+
+    kwargs = {} if progress is _DEFAULT else {'progress': progress}
+
+    capsys.readouterr()
+    np.random.seed(20250902)
+    events = list(simulator.run_events(**kwargs))
+
+    return events, capsys.readouterr().err
+
+
+def test_progress_false_writes_no_progress_bar(capsys):
+    _, err = _run_capturing_stderr(capsys, progress=False)
+
+    # tqdm's rate field: present in every refresh it emits, absent entirely
+    # when the bar is disabled.
+    assert 'it/s' not in err
+    assert err.strip() == ''
+
+
+def test_progress_defaults_to_on(capsys):
+    # The default must stay `True`, so nothing outside the notebooks changes
+    # behaviour. The keyword is deliberately not passed: an earlier version
+    # of this test passed `progress=True` explicitly and so still passed
+    # with the default flipped to `False`.
+    _, err = _run_capturing_stderr(capsys, _DEFAULT)
+
+    assert 'it/s' in err
+
+
+def test_progress_does_not_affect_the_simulation(capsys):
+    # Same seed, both settings: the bar is presentation only. This is what
+    # makes it safe to switch off in a notebook whose outputs are committed
+    # and whose numbers the prose quotes.
+    with_bar, _ = _run_capturing_stderr(capsys, progress=True)
+    without_bar, _ = _run_capturing_stderr(capsys, progress=False)
+
+    assert len(with_bar) == len(without_bar)
+    assert len(with_bar) > 0
+
+    for (t_a, _, sim_a, reco_a), (t_b, _, sim_b, reco_b) in zip(with_bar, without_bar):
+        assert t_a == t_b
+        assert sim_a.energy == sim_b.energy
+        assert sim_a.direction == sim_b.direction
+        assert reco_a.triggered == reco_b.triggered

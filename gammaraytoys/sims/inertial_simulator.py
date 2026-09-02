@@ -270,7 +270,7 @@ class InertialSimulator(SimulatorBase):
 
         return total
 
-    def run_events(self, tstart = None, tstop = None):
+    def run_events(self, tstart = None, tstop = None, progress = True):
         """
         Walk the spacecraft history and yield one event per photon actually
         launched at the detector.
@@ -292,6 +292,11 @@ class InertialSimulator(SimulatorBase):
             default) runs to the end of the spacecraft history. Intervals
             overlapping the window only partly are clipped to the overlap
             (see `_poses`).
+        progress : bool, optional
+            Whether to draw the tqdm progress bar. `True` by default. Pass
+            `False` in a notebook whose outputs are committed, since tqdm
+            writes a stream output per refresh and those are stored in the
+            `.ipynb`.
 
         Yields
         ------
@@ -306,7 +311,8 @@ class InertialSimulator(SimulatorBase):
         ntrig = 0
         noccult = 0
 
-        with tqdm(total = self._expected_counts(tstart, tstop)) as pbar:
+        with tqdm(total = self._expected_counts(tstart, tstop),
+                  disable = not progress) as pbar:
 
             for pose, start, stop, livetime in self._poses(tstart, tstop):
 
@@ -342,7 +348,7 @@ class InertialSimulator(SimulatorBase):
         self.noccult += noccult
 
     def run_binned(self, axes = None, photon_axes = None,
-                   tstart = None, tstop = None):
+                   tstart = None, tstop = None, progress = True):
         """
         Run `run_events` to completion, filling reconstructed (and,
         optionally, thrown-photon) histograms instead of yielding events.
@@ -372,6 +378,8 @@ class InertialSimulator(SimulatorBase):
             Start of the time window to simulate. See `run_events`.
         tstop : `astropy.units.Quantity` or None
             End of the time window to simulate. See `run_events`.
+        progress : bool, optional
+            Whether to draw the progress bar. See `run_events`.
 
         Returns
         -------
@@ -381,6 +389,7 @@ class InertialSimulator(SimulatorBase):
         """
 
         events = ((sim_event, reco_event)
-                  for _, _, sim_event, reco_event in self.run_events(tstart, tstop))
+                  for _, _, sim_event, reco_event in self.run_events(tstart, tstop,
+                                                                    progress = progress))
 
         return self._run_binned(events, axes = axes, photon_axes = photon_axes)

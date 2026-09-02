@@ -123,7 +123,7 @@ class Simulator(SimulatorBase):
         return len(self.sources)
 
     def run_binned(self, nsim = None, ntrig = None, duration = None,
-                   axes = None, photon_axes = None):
+                   axes = None, photon_axes = None, progress = True):
         """
         Run `run_events` to completion, filling reconstructed (and,
         optionally, thrown-photon) histograms instead of yielding events.
@@ -158,6 +158,8 @@ class Simulator(SimulatorBase):
             that produced it), and a second histogram `h_sim` records every
             *launched* photon (triggered or not) over the requested photon
             axes alone.
+        progress : bool, optional
+            Whether to draw the progress bar. See `run_events`.
 
         Returns
         -------
@@ -166,10 +168,12 @@ class Simulator(SimulatorBase):
             `(h_data, h_sim)`.
         """
 
-        return self._run_binned(self.run_events(nsim, ntrig, duration),
+        return self._run_binned(self.run_events(nsim, ntrig, duration,
+                                                progress = progress),
                                 axes = axes, photon_axes = photon_axes)
 
-    def run_events(self, nsim = None, ntrig = None, duration = None):
+    def run_events(self, nsim = None, ntrig = None, duration = None,
+                   progress = True):
         """
         Throw photons at the detector and yield one (simulated, reconstructed)
         pair per launched photon, until a finishing condition is met.
@@ -213,6 +217,11 @@ class Simulator(SimulatorBase):
         duration : `astropy.units.Quantity`, optional
             Stop after launching the number of photons expected in this
             much simulated live time, given `self.total_simulated_rate` (time units).
+        progress : bool, optional
+            Whether to draw the tqdm progress bar. `True` by default. Pass
+            `False` in a notebook whose outputs are committed, since tqdm
+            writes a stream output per refresh and those are stored in the
+            `.ipynb`.
 
         Yields
         ------
@@ -230,7 +239,8 @@ class Simulator(SimulatorBase):
 
         terminate = False
 
-        with tqdm(total = nsim_target if np.isfinite(nsim_target) else ntrig_target) as pbar:
+        with tqdm(total = nsim_target if np.isfinite(nsim_target) else ntrig_target,
+                  disable = not progress) as pbar:
         
             while True:
 
