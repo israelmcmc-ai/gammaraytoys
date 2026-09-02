@@ -91,7 +91,7 @@ class _MinimalNearFieldSource(NearFieldSource):
     def spectrum(self):
         return self._spectrum
 
-    def random_photon(self, detector, pose=None):
+    def random_photon(self, detector, pose=None, earth=None):
         return self._point_source.random_photon(detector=detector)
 
     def simulated_rate(self, detector, pose=None):

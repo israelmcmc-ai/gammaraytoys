@@ -85,7 +85,7 @@ class _StubNearFieldSource(NearFieldSource):
     def spectrum(self):
         return self._spectrum
 
-    def random_photon(self, detector, pose=None):
+    def random_photon(self, detector, pose=None, earth=None):
         raise NotImplementedError
 
     def simulated_rate(self, detector, pose=None):

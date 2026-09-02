@@ -24,6 +24,15 @@ class SpacecraftInterval:
     One interval of a `SpacecraftHistory`: a span of time over which the
     spacecraft's orbital pose and attitude are held fixed (Section 4.2).
 
+    An interval yielded by `SpacecraftHistory.__iter__` is a row of the
+    underlying file: `start_time`/`stop_time` are consecutive row
+    timestamps and `livetime` is that row's `uptime_s`. One yielded by
+    `SpacecraftHistory.intervals(tstart, tstop)` may instead be a *view* of
+    the requested time window -- clipped to `[tstart, tstop)`, with
+    `livetime` rescaled by the surviving fraction of the original span --
+    and so need not correspond to any single row. Either way `0 <=
+    livetime <= stop_time - start_time` holds.
+
     Attributes
     ----------
     start_time : Quantity
@@ -520,6 +529,70 @@ class SpacecraftHistory:
                 orbit_radius = self._orbit_radius_km[i] * u.km,
                 orbit_angle = self._orbit_angle_deg[i] * u.deg,
                 attitude = self._attitude_deg[i] * u.deg,
+            )
+
+    def intervals(self, tstart = None, tstop = None):
+        """
+        Iterate over the intervals that overlap `[tstart, tstop)`, clipped to
+        that window.
+
+        This is `__iter__` narrowed to a time window: an interval entirely
+        outside `[tstart, tstop)` is dropped, and one that only partly
+        overlaps is clipped to the overlap -- its `start_time`/`stop_time`
+        become the overlap's bounds, and its `livetime` is rescaled by the
+        surviving fraction of its span, `livetime * (hi - lo) / (stop -
+        start)`. That rescale matches Section 4.2's semantics of deadtime
+        spread evenly through the interval, so a window covering a fraction
+        `f` of an interval's span carries `f * livetime`. With `tstart` and
+        `tstop` both `None` this yields exactly what `__iter__` does, whole,
+        with nothing clipped.
+
+        A clipped `SpacecraftInterval` is a view of the requested window, not
+        a row of the underlying file: its `start_time`/`stop_time` need not
+        match any row timestamp. It is still internally consistent -- `0 <=
+        livetime <= stop_time - start_time` continues to hold, since both the
+        span and the livetime are scaled by the same overlap.
+
+        Parameters
+        ----------
+        tstart, tstop : `astropy.units.Quantity` or None
+            Time window to narrow the intervals to (time units). `None`
+            means "no narrowing at that end" -- `tstart = None` is
+            equivalent to `-inf`, `tstop = None` to `+inf`.
+
+        Yields
+        ------
+        SpacecraftInterval
+            Each overlapping interval, clipped to `[tstart, tstop)`, in
+            order.
+        """
+
+        window_start = -np.inf if tstart is None else tstart.to_value(u.s)
+        window_stop = np.inf if tstop is None else tstop.to_value(u.s)
+
+        for interval in self:
+
+            start = interval.start_time.to_value(u.s)
+            stop = interval.stop_time.to_value(u.s)
+
+            lo = max(start, window_start)
+            hi = min(stop, window_stop)
+
+            if hi <= lo:
+                continue
+
+            # Timestamps are spread over the whole (clipped) span, while the
+            # livetime -- which only scales the count -- is scaled by the
+            # same fraction of the interval that survived the clip.
+            live = interval.livetime.to_value(u.s) * (hi - lo) / (stop - start)
+
+            yield SpacecraftInterval(
+                start_time = lo * u.s,
+                stop_time = hi * u.s,
+                livetime = live * u.s,
+                orbit_radius = interval.orbit_radius,
+                orbit_angle = interval.orbit_angle,
+                attitude = interval.attitude,
             )
 
     def plot(self, ax = None, earth = None, nposes = 12):

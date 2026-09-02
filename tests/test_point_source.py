@@ -4,7 +4,7 @@ import pytest
 
 from gammaraytoys.sims import (PointSource, IsotropicSource,
                                MonoenergeticSpectrum, PowerLawSpectrum,
-                               Photon)
+                               Photon, SpacecraftInterval, Earth)
 
 
 def test_pointsource_flux_from_pivot():
@@ -240,17 +240,304 @@ def test_pointsource_random_photon_pose_is_accepted_and_ignored(tracker):
     assert photon_with_pose.position.y == photon_no_pose.position.y
 
 
-def test_isotropic_source_random_photon_pose_is_accepted_and_ignored(tracker):
+def test_isotropic_source_random_photon_unocculted_pose_changes_nothing(tracker):
+    # PR 1 asserted here that `pose` was a pure no-op for IsotropicSource.
+    # PR 3 gives it one real effect and one only: a photon whose direction
+    # falls behind the Earth is discarded. Everything else -- the direction
+    # itself, the energy, the injection position, and the order in which
+    # they consume random numbers -- must still be untouched by the pose, so
+    # a pose that occults nothing has to reproduce the pose-less photon
+    # exactly. The orbit here is far enough out (10^6 km, well past the
+    # Moon) that the Earth subtends ~0.4 deg and no direction realistically
+    # hits it; the seed makes that deterministic.
     spec = MonoenergeticSpectrum(1 * u.MeV)
     source = IsotropicSource(spectrum=spec, flux=1 / u.cm / u.s)
+
+    distant_pose = SpacecraftInterval(
+        start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+        orbit_radius=1e6 * u.km, orbit_angle=0 * u.deg, attitude=0 * u.deg)
+    earth = Earth()
 
     np.random.seed(54321)
     photon_no_pose = source.random_photon(tracker)
 
     np.random.seed(54321)
-    photon_with_pose = source.random_photon(tracker, pose="not a real pose yet")
+    photon_with_pose = source.random_photon(tracker, pose=distant_pose, earth=earth)
 
     assert photon_with_pose.direction == photon_no_pose.direction
     assert photon_with_pose.energy == photon_no_pose.energy
     assert photon_with_pose.position.x == photon_no_pose.position.x
     assert photon_with_pose.position.y == photon_no_pose.position.y
+
+
+# --- PR 3: sky_angle, occultability, and the inertial transform ------------
+#
+# Section 3.4: a far-field photon from sky angle lambda flies at
+# `direction_inertial = lambda + 180 deg`, which the detector-frame transform
+# sends to `270 deg - Nu` with `Nu = wrap180(A - lambda)`. Every expected
+# direction below is that formula evaluated by hand, never a value read back
+# out of the implementation.
+
+def _pose(attitude_deg, sky_angle_deg, orbit_radius_km = 6771.0):
+    """A one-second `(SpacecraftInterval, Earth)` pair at a given attitude,
+    with nadir placed opposite `sky_angle_deg` on the sky so the source is
+    guaranteed visible.
+
+    The Earth is no longer carried on the pose (PR 3's `random_photon` takes
+    it as its own argument instead, see `FarFieldSource._occulted`), so this
+    helper hands back the two separately; pass both straight through to
+    `random_photon(tracker, pose=pose, earth=earth)`.
+
+    Occultation depends only on `orbit_angle` (nadir = orbit_angle + 180
+    deg) and `orbit_radius` -- never on `attitude` -- so a fixed
+    `orbit_angle` picked once (as this helper used to do, defaulting to
+    135 deg on the mistaken belief that nadir at 315 deg was "comfortably
+    outside the Earth's disc" for every sky angle used below, and using a
+    wrong Earth radius of 6371 km besides -- astropy's default `R_earth`
+    is 6378.1 km, giving rho = arcsin(6378.1/6771) = 70.39 deg, not 70.2 --
+    can still leave a source occulted; sky_angle = 0, 10 and 17 deg all
+    fell inside that wedge) can only be checked by hand for the specific
+    angles a test happens to use.
+
+    Deriving `orbit_angle` from the source itself sidesteps that: putting
+    nadir at `sky_angle_deg + 180 deg` puts the *anti*-nadir exactly on
+    the source, the maximum possible 180 deg separation from nadir. Since
+    a valid orbit always has `orbit_radius > R_E`, `rho = arcsin(R_E / r)`
+    is always below 90 deg, so 180 deg separation is occultation-proof by
+    construction -- for any sky angle, any attitude, any orbit radius a
+    caller passes here, not just the ones exercised today.
+
+    The premise is still asserted below, against the real `Earth` and the
+    real occultation geometry, so that a future change to this helper (or
+    to the occultation formula itself) cannot silently reintroduce a
+    hidden source instead of failing loudly.
+    """
+
+    orbit_angle_deg = sky_angle_deg % 360.0
+
+    earth = Earth()
+
+    pose = SpacecraftInterval(start_time = 0 * u.s,
+                              stop_time = 1 * u.s,
+                              livetime = 1 * u.s,
+                              orbit_radius = orbit_radius_km * u.km,
+                              orbit_angle = orbit_angle_deg * u.deg,
+                              attitude = attitude_deg * u.deg)
+
+    assert not earth.is_occulted(
+        sky_angle_deg * u.deg, pose.orbit_angle, pose.orbit_radius), (
+        f"_pose fixture bug: sky_angle={sky_angle_deg} deg is occulted by "
+        f"the Earth at orbit_angle={orbit_angle_deg} deg, "
+        f"orbit_radius={orbit_radius_km} km")
+
+    return pose, earth
+
+
+def _wrap180(angle_deg):
+    return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def _mentions_both_angles(excinfo):
+    """The error has to name both alternatives, however it spells them
+    ('offaxis_angle' / 'off-axis angle', 'sky_angle' / 'sky angle')."""
+
+    message = str(excinfo.value).lower()
+
+    return 'axis' in message and 'sky' in message
+
+
+def test_pointsource_rejects_both_offaxis_angle_and_sky_angle():
+    with pytest.raises(Exception) as excinfo:
+        PointSource(offaxis_angle=10 * u.deg, sky_angle=20 * u.deg,
+                    spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    assert _mentions_both_angles(excinfo), str(excinfo.value)
+
+
+def test_pointsource_rejects_neither_offaxis_angle_nor_sky_angle():
+    with pytest.raises(Exception) as excinfo:
+        PointSource(spectrum=MonoenergeticSpectrum(1 * u.MeV))
+
+    assert _mentions_both_angles(excinfo), str(excinfo.value)
+
+
+def test_pointsource_sky_angle_requires_a_pose(tracker):
+    source = PointSource(sky_angle=45 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    with pytest.raises(Exception) as excinfo:
+        source.random_photon(tracker)
+
+    # It has to say *why*, not just blow up somewhere downstream.
+    assert 'pose' in str(excinfo.value).lower()
+
+
+@pytest.mark.parametrize("sky_angle_deg, attitude_deg", [
+    (0.0, 0.0),
+    (45.0, 90.0),
+    (90.0, 90.0),        # on-axis: Nu = 0, direction 270 deg
+    (0.0, 90.0),         # Nu = 90 deg, direction 180 deg
+    (200.0, 30.0),       # Nu = -170 deg, direction 440 -> 80 deg
+    (10.0, 400.0),       # unwrapped attitude, Nu = 30 deg
+    (33.0, 1090.0),      # three full turns past 360 deg
+    (135.0, 0.0),        # Nu = -135 deg, direction 405 -> 45 deg
+])
+def test_pointsource_sky_angle_photon_direction_follows_the_plan_transform(
+        tracker, sky_angle_deg, attitude_deg):
+    source = PointSource(sky_angle=sky_angle_deg * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    pose, earth = _pose(attitude_deg, sky_angle_deg)
+    photon = source.random_photon(tracker, pose=pose, earth=earth)
+
+    assert photon is not None
+
+    offaxis_deg = _wrap180(attitude_deg - sky_angle_deg)
+    expected_direction = (270.0 - offaxis_deg) % 360.0
+
+    assert _wrap180(photon.direction.to_value(u.deg) - expected_direction) == pytest.approx(
+        0.0, abs=1e-8)
+
+
+def test_pointsource_sky_angle_photon_direction_is_wrapped_into_zero_to_360(tracker):
+    # `Nu = wrap180(A - lambda)` can be negative, and `270 - Nu` then exceeds
+    # 360 deg. The detector's `simulate_event` decides which way a photon
+    # flies with a bare `direction < 180 deg` test, so an unwrapped 405 deg
+    # would be walked downwards when it is really flying up at 45 deg.
+    source = PointSource(sky_angle=135 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    for _ in range(10):
+        pose, earth = _pose(0.0, 135.0)
+        photon = source.random_photon(tracker, pose=pose, earth=earth)
+
+        direction = photon.direction.to_value(u.deg)
+
+        assert 0.0 <= direction < 360.0
+        assert direction == pytest.approx(45.0, abs=1e-8)
+
+
+def test_pointsource_sky_angle_photon_starts_on_the_plane_for_its_offaxis_angle(tracker):
+    # Position and direction must stay consistent: the photon has to be
+    # launched from the throwing plane belonging to the *transformed*
+    # off-axis angle, not to some stale one.
+    sky_angle_deg = 200.0
+    attitude_deg = 30.0
+    offaxis = _wrap180(attitude_deg - sky_angle_deg) * u.deg
+
+    source = PointSource(sky_angle=sky_angle_deg * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    radius = tracker.surrounding_circle_radius.to_value(u.cm)
+
+    for _ in range(20):
+        pose, earth = _pose(attitude_deg, sky_angle_deg)
+        photon = source.random_photon(tracker, pose=pose, earth=earth)
+
+        assert _radial_offset(tracker, photon.position, offaxis).to_value(u.cm) == pytest.approx(
+            radius)
+
+
+def test_pointsource_sky_angle_tracks_a_changing_attitude(tracker):
+    # The same source, seen from three attitudes 90 deg apart, must produce
+    # three directions 90 deg apart -- the sky is fixed, the spacecraft turns.
+    source = PointSource(sky_angle=17 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    directions = []
+    for a in (0.0, 90.0, 180.0, 270.0):
+        pose, earth = _pose(a, 17.0)
+        directions.append(
+            source.random_photon(tracker, pose=pose, earth=earth).direction.to_value(u.deg))
+
+    for i in range(1, len(directions)):
+        # direction_det = 270 - (A - lambda), so it *decreases* by 90 deg
+        # each time the attitude increases by 90 deg.
+        step = _wrap180(directions[i] - directions[i - 1])
+        assert step == pytest.approx(-90.0, abs=1e-8)
+
+
+def test_pointsource_offaxis_angle_is_unaffected_by_a_real_pose(tracker):
+    # Trap 2 in Section 8: `pose = None` must mean exactly today's behaviour,
+    # and an `offaxis_angle`-specified source must ignore a pose entirely.
+    source = PointSource(offaxis_angle=30 * u.deg,
+                         spectrum=MonoenergeticSpectrum(1 * u.MeV),
+                         flux=1 / u.cm / u.s)
+
+    np.random.seed(2024)
+    without = source.random_photon(tracker)
+
+    # `sky_angle_deg` here is a don't-care: an `offaxis_angle` source ignores
+    # the pose entirely, occultation included, so any value satisfies _pose's
+    # visibility premise without affecting what this test actually checks.
+    np.random.seed(2024)
+    pose, earth = _pose(123.0, 0.0)
+    with_pose = source.random_photon(tracker, pose=pose, earth=earth)
+
+    assert with_pose is not None
+    assert with_pose.direction == without.direction
+    assert with_pose.energy == without.energy
+    assert with_pose.position.x == without.position.x
+    assert with_pose.position.y == without.position.y
+
+    # And the direction is still the plain detector-frame convention.
+    assert without.direction.to_value(u.deg) == pytest.approx(240.0)
+
+
+def test_farfield_sources_are_occultable_by_default():
+    # Section 8.1 / the PR 3 contract: `FarFieldSource.occultable` defaults
+    # to True; only `EarthAlbedoSource` (PR 5) turns it off.
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+
+    assert PointSource(offaxis_angle=0 * u.deg, spectrum=spec).occultable is True
+    assert PointSource(sky_angle=0 * u.deg, spectrum=spec).occultable is True
+    assert IsotropicSource(spectrum=spec).occultable is True
+
+
+# --- F4 (PR3 review): FarFieldSource._occulted's earth=None error branch ---
+#
+# `_occulted` documents (source.py) that an occultable source given a pose
+# but no `earth` must raise `ValueError`, rather than silently skipping the
+# occultation test or crashing somewhere deeper (e.g. `None.radius`).
+# Nothing asserted this for either `PointSource` or `IsotropicSource`.
+
+def _pose_only(attitude_deg = 0.0, orbit_angle_deg = 0.0, orbit_radius_km = 6771.0):
+    """A bare `SpacecraftInterval`, with no `Earth` at all -- for testing the
+    `pose is not None, earth is None` error branch."""
+
+    return SpacecraftInterval(start_time = 0 * u.s,
+                              stop_time = 1 * u.s,
+                              livetime = 1 * u.s,
+                              orbit_radius = orbit_radius_km * u.km,
+                              orbit_angle = orbit_angle_deg * u.deg,
+                              attitude = attitude_deg * u.deg)
+
+
+def test_pointsource_sky_angle_raises_when_given_a_pose_but_no_earth(tracker):
+    source = PointSource(sky_angle = 10 * u.deg,
+                         spectrum = MonoenergeticSpectrum(1 * u.MeV),
+                         flux = 1 / u.cm / u.s)
+
+    pose = _pose_only()
+
+    with pytest.raises(ValueError) as excinfo:
+        source.random_photon(tracker, pose = pose, earth = None)
+
+    assert 'earth' in str(excinfo.value).lower()
+
+
+def test_isotropic_source_raises_when_given_a_pose_but_no_earth(tracker):
+    source = IsotropicSource(spectrum = MonoenergeticSpectrum(1 * u.MeV),
+                             flux = 1 / u.cm / u.s)
+
+    pose = _pose_only()
+
+    with pytest.raises(ValueError) as excinfo:
+        source.random_photon(tracker, pose = pose, earth = None)
+
+    assert 'earth' in str(excinfo.value).lower()

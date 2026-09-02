@@ -38,3 +38,40 @@ jobs:
 
       - name: Run ruff
         run: ruff check .
+
+  notebooks:
+    # Final step, after tests pass: execute the cosimita example notebooks
+    # as a smoke check. pytest never imports or runs a notebook, so a
+    # breaking refactor (e.g. gammaraytoys/sims/transform.py moving to
+    # gammaraytoys/coordinates/) can pass the full test suite while a
+    # notebook still fails on import. This is a development-time stand-in
+    # for that coverage -- it should eventually be replaced by proper
+    # lightweight unit tests exercising the same code paths, but running
+    # the real notebooks is fine for now.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and notebook execution tools
+        run: |
+          pip install -e ".[test]"
+          pip install jupyter nbconvert ipykernel
+
+      - name: Execute cosimita example notebooks
+        env:
+          # Non-interactive backend: a notebook that tries to pop up a GUI
+          # window can never hang the runner waiting for a display.
+          MPLBACKEND: Agg
+        run: |
+          set -e
+          for nb in docs/examples/cosimita/*.ipynb; do
+            echo "::group::Executing $nb"
+            jupyter nbconvert --to notebook --execute --stdout \
+              --ExecutePreprocessor.timeout=180 "$nb" > /dev/null
+            echo "::endgroup::"
+          done
