@@ -140,7 +140,7 @@ def test_near_source_at_center_triggers_far_more_often_than_far_source():
     # triggered counts; asserted at 4 sigma.
     detector = _make_tracker()
     rate = 600 * u.Hz
-    duration = 2 * u.s
+    duration = 6 * u.s
 
     center_source = NearPointSource(position=detector.surrounding_circle_center,
                                     spectrum=SPECTRUM, rate=rate)
@@ -170,8 +170,8 @@ def test_near_source_at_center_triggers_far_more_often_than_far_source():
     mean_launched_center = (rate_center * duration).to_value(u.one)
     mean_launched_far = (rate_far * duration).to_value(u.one)
 
-    assert mean_launched_center == pytest.approx(1200.0)
-    assert mean_launched_far == pytest.approx(19.11, abs=0.01)
+    assert mean_launched_center == pytest.approx(3600.0)
+    assert mean_launched_far == pytest.approx(57.32, abs=0.01)
 
     n_launched_center = np.random.poisson(mean_launched_center)
     n_launched_far = np.random.poisson(mean_launched_far)
@@ -193,6 +193,100 @@ def test_near_source_at_center_triggers_far_more_often_than_far_source():
     # Sanity: the far source did launch some photons, or the comparison
     # above would be checking against zero on both sides vacuously.
     assert n_launched_far > 0
+
+    # Two-sided: the assertion above is satisfied just as well by a far
+    # source that has stopped aiming at the detector altogether (it would
+    # then trigger even *less* than a correctly-aimed one, which only
+    # widens the gap to the centre source -- a bug that breaks aim_angle,
+    # e.g. transposing `np.arctan2(dy, dx)`, REINFORCES this assertion
+    # rather than being caught by it). Require the far source to actually
+    # trigger at least once, so a source that has stopped reaching the
+    # circle at all cannot pass by virtue of triggering *less* than
+    # expected. The dedicated ray-geometry test below is what actually
+    # verifies aim_angle is correct; this is a lightweight second check in
+    # the same spirit, local to this test.
+    assert n_triggered_far > 0
+
+
+# --- 14. drawn directions actually reach the surrounding circle -----------
+
+def _closest_approach_and_forward_parameter(photon, center, length_unit=u.cm):
+    """Closest approach of the infinite ray `(photon.position, photon.direction)`
+    to `center`, and the ray parameter `t` at that closest point (`t > 0`
+    means the closest point is ahead of the photon, `t < 0` means behind).
+
+    Plain ray/point geometry, independent of anything in
+    `gammaraytoys.sims.source`: with `d = (cos(direction), sin(direction))`
+    the unit *velocity* direction (the contract's "standard maths
+    convention", cross-checked in CONTRACT.md against `PointSource`'s own
+    `270 deg - offaxis_angle`) and `w = center - position`,
+    `t = w . d` and the closest-approach distance is
+    `sqrt(|w|^2 - t^2)`.
+    """
+
+    x0 = photon.position.x.to_value(length_unit)
+    y0 = photon.position.y.to_value(length_unit)
+    theta = photon.direction.to_value(u.rad)
+    dx, dy = np.cos(theta), np.sin(theta)
+
+    wx = center.x.to_value(length_unit) - x0
+    wy = center.y.to_value(length_unit) - y0
+
+    t = wx * dx + wy * dy
+    dist2 = max(wx**2 + wy**2 - t**2, 0.0)
+
+    return np.sqrt(dist2), t
+
+
+def test_near_source_drawn_directions_actually_reach_the_surrounding_circle():
+    # Section 5.4 / CONTRACT.md: "every direction drawn is one that reaches
+    # the surrounding circle by construction -- there is no rejection
+    # step." That claim is the entire geometric justification for
+    # `f = arcsin(a/s) / pi`, and nothing above actually checks it:
+    # `simulated_rate` is a pure function of `s` and `a`, never of the aim
+    # direction, so a source that computes `aim_angle` wrong (e.g. a
+    # transposed `np.arctan2(dy, dx) -> np.arctan2(dx, dy)`, or one aimed
+    # exactly backward) would still pass every rate-based test above.
+    #
+    # For each of several hundred drawn photons, at three s/a ratios (0.5,
+    # inside the circle; 1.5 and 5.0, outside), compute the ray's closest
+    # approach to `detector.surrounding_circle_center` from first-principles
+    # ray geometry (`_closest_approach_and_forward_parameter`, independent
+    # of any code in `gammaraytoys.sims.source`) and require:
+    #
+    #   (a) the closest-approach distance is strictly less than the
+    #       surrounding-circle radius, for EVERY draw (100%, not a
+    #       statistical fraction -- the plan promises this unconditionally,
+    #       not "usually").
+    #   (b) for a source outside the circle, the closest-approach parameter
+    #       t is positive -- the circle is ahead of the photon, not behind
+    #       it. A distance-only check cannot catch a source aimed exactly
+    #       180 deg wrong, since an infinite line's closest approach to a
+    #       point doesn't depend on which way along it you're facing; only
+    #       the sign of t does.
+    detector = _make_tracker()
+    center = detector.surrounding_circle_center
+    a = detector.surrounding_circle_radius.to_value(u.cm)
+    rate = 100 * u.Hz
+    n = 500
+
+    for s_over_a, outside in [(0.5, False), (1.5, True), (5.0, True)]:
+        position = _near_position(detector, s_over_a, direction_deg=200.0)
+        source = NearPointSource(position=position, spectrum=SPECTRUM, rate=rate)
+
+        for _ in range(n):
+            photon = source.random_photon(detector)
+            distance, t_closest = _closest_approach_and_forward_parameter(photon, center)
+
+            assert distance < a, (
+                f"s/a={s_over_a}: closest approach {distance} cm to the "
+                f"circle centre is not less than the circle radius {a} cm "
+                "-- this direction does not reach the surrounding circle")
+
+            if outside:
+                assert t_closest > 0, (
+                    f"s/a={s_over_a}: the circle's closest approach point "
+                    f"is behind the photon (t={t_closest}), not ahead of it")
 
 
 # --- 9. the acceptance is discontinuous at s = a ---------------------------
@@ -495,14 +589,33 @@ def test_extended_source_plot_arc_is_centred_on_the_sky_angle_not_last_draw():
 
     source = ExtendedSource(sky_angle=sky_angle, width=width, spectrum=SPECTRUM, flux=1 / u.cm / u.s)
 
-    pose = SpacecraftInterval(start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
-                              orbit_radius=7000 * u.km, orbit_angle=0 * u.deg,
-                              attitude=80 * u.deg)
     earth = Earth(radius=1 * u.m)  # negligible occultation, see above
 
-    # Draw until we get a sample whose off-axis angle differs meaningfully
-    # from the true distribution centre, so a bug that centres on the last
-    # draw instead of the true centre cannot pass by accident.
+    # Draw first at one pose, then at a second, DIFFERENT pose, and plot
+    # only after the second. `plot` must reflect the *last* pose a photon
+    # was actually drawn at, not the first -- a `_last_attitude` that gets
+    # set once and never updated again (a distinct staleness bug from the
+    # "last draw vs true centre" one this test also targets) would still
+    # plot the first pose's centre and this catches that too.
+    pose_1 = SpacecraftInterval(start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+                                orbit_radius=7000 * u.km, orbit_angle=0 * u.deg,
+                                attitude=80 * u.deg)
+    pose_2 = SpacecraftInterval(start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+                                orbit_radius=7000 * u.km, orbit_angle=0 * u.deg,
+                                attitude=200 * u.deg)
+
+    for _ in range(20):
+        photon = source.random_photon(detector, pose=pose_1, earth=earth)
+        if photon is not None:
+            break
+    else:
+        pytest.fail("never drew a surviving photon at pose_1")
+
+    pose = pose_2
+
+    # Draw until we get a sample (at pose_2) whose off-axis angle differs
+    # meaningfully from the true distribution centre, so a bug that centres
+    # on the last draw instead of the true centre cannot pass by accident.
     expected_center = sky_angle_to_offaxis(sky_angle, pose.attitude)
     for _ in range(200):
         photon = source.random_photon(detector, pose=pose, earth=earth)
