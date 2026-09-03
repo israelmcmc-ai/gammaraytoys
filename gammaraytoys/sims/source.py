@@ -8,6 +8,7 @@ from .spectrum import MonoenergeticSpectrum
 from copy import copy
 import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
+from scipy.stats import vonmises
 
 # `ToyTracker2D.plot()` hardcodes its data coordinates to this unit -- every
 # source marker drawn on top of it must match, or it lands in the right
@@ -778,7 +779,68 @@ class NearFieldSource(Source):
                self.position.y.to_value(length_unit),
                **style)
 
+        # `ToyTracker2D.plot()` sizes its axes to 1.5x its own surrounding
+        # circle, so a near source further out than that -- most of the
+        # `s >= a` branch -- lands outside the visible axes and vanishes
+        # without any warning. Grow the limits to reach it, exactly as the
+        # far-field plot methods do for the sky circle.
+        center = detector.surrounding_circle_center
+        offset = np.hypot((self.position.x - center.x).to_value(length_unit),
+                          (self.position.y - center.y).to_value(length_unit))
+        _expand_axes_limits(ax, center, offset * length_unit, length_unit)
+
         return ax
+
+# Above this concentration `scipy.stats.vonmises.rvs` stops terminating: its
+# rejection sampler effectively never accepts, and the loop is inside compiled
+# code, so the process cannot even be interrupted. kappa = 1/width**2, so this
+# is reached at a width of about 1e-8 deg -- far narrower than any physically
+# meaningful source, and exactly what a reader gets by taking the docstring's
+# "at very small width this behaves like a PointSource" literally and passing 0.
+_MAX_VON_MISES_KAPPA = 1e15
+
+
+def _von_mises_kappa(width):
+    """
+    Convert a `width` to a von Mises concentration, rejecting values that
+    would hang the sampler.
+
+    Parameters
+    ----------
+    width : `astropy.units.Quantity`
+        Angular width (the sigma a user thinks in).
+
+    Returns
+    -------
+    float
+        `kappa = 1 / width**2`, with `width` in radians.
+
+    Raises
+    ------
+    ValueError
+        If `width` is not strictly positive, or is so small that
+        `scipy.stats.vonmises` would not terminate. Use `PointSource` for a
+        source that narrow.
+    """
+
+    width_rad = width.to_value(u.rad)
+
+    if not width_rad > 0:
+        raise ValueError(
+            f"ExtendedSource needs a strictly positive width, got {width}. "
+            "For a source at a single exact direction use PointSource.")
+
+    kappa = 1 / width_rad**2
+
+    if kappa > _MAX_VON_MISES_KAPPA:
+        raise ValueError(
+            f"width = {width} is too narrow to sample: it gives a von Mises "
+            f"concentration of {kappa:.3g}, above the {_MAX_VON_MISES_KAPPA:.0e} "
+            "at which scipy's sampler stops terminating. Use PointSource, "
+            "which this source reproduces in that limit anyway.")
+
+    return kappa
+
 
 class PointSource(FarFieldSource):
     """
@@ -1190,5 +1252,486 @@ class IsotropicSource(FarFieldSource):
 
         self.plot_sky_circle(ax, detector)
         self.plot_sky_arc(ax, detector, center_angle = 0*u.deg, extent = 360*u.deg, **kwargs)
+
+        return ax
+
+class NearPointSource(NearFieldSource):
+    """
+    An isotropic emitter at a fixed **detector-frame** position, e.g. an
+    activation line, a calibration source, or a hot component on the bus.
+
+    Unlike a `FarFieldSource`, this source does not live on the sky: it sits
+    at a fixed `position` in the detector frame and is normalized by a total
+    emission rate `rate` [1/s] over the full `2*pi` of directions, rather
+    than a flux. It does not move with the spacecraft, so `pose` (and
+    `earth`, since it is never occulted) are ignored entirely by both
+    `random_photon` and `simulated_rate` (plan Section 5.4).
+
+    Only a fraction of the emitted photons are even aimed at the detector's
+    surrounding circle. With `c` the circle's centre
+    (`detector.surrounding_circle_center`), `a` its radius
+    (`detector.surrounding_circle_radius`), and `s = |position - c|`:
+
+    - if `s >= a` (the source sits outside the circle), the circle subtends
+      a half-angle `Delta = arcsin(a/s)` as seen from the source. The flight
+      direction is drawn uniformly in `[aim_angle - Delta, aim_angle +
+      Delta]`, where `aim_angle` points from the source straight at the
+      circle's centre -- and, by the same convention `PointSource` uses for
+      its own flight direction, `aim_angle` needs no further offset to be a
+      `Photon.direction`. The acceptance fraction is `f = Delta / pi`.
+    - if `s < a` (the source sits inside the circle), every direction
+      reaches the circle, so `f = 1` and the flight direction is drawn
+      uniformly over the whole `[0, 360) deg`.
+
+    Either way every direction drawn is one that geometrically reaches the
+    surrounding circle -- there is no rejection step. Whether it then
+    actually crosses a detector layer is a separate question, since the
+    layers are infinitesimal planes (see `docs/dev/inertial_sim_plan.md`
+    Section 8, trap 5): a source that sits between two layers and aims
+    close to horizontal can miss every layer's finite extent entirely, and
+    that shows up as reduced efficiency rather than as a wrong
+    normalization here.
+
+    The geometry above (`aim_angle`, `Delta`, `f`) depends only on
+    `position` and the detector, so it is computed once and cached as plain
+    floats, keyed on detector identity, rather than recomputed with
+    `Quantity` arithmetic on every photon (see the module's performance
+    note in the plan, Section 8 trap 8).
+    """
+
+    def __init__(self, position, spectrum, rate = None,
+                chirality = None, chirality_degree = 0):
+        """
+        Parameters
+        ----------
+        position : `Cartesian2D`
+            Fixed position of the source in the detector frame, in length
+            units (e.g. cm).
+        spectrum : `Spectrum`
+            The source's energy spectrum shape.
+        rate : `astropy.units.Quantity`, optional
+            Total emission rate of the source, in `1/s`, integrated over the
+            full `2*pi` of directions. `None` (the default) leaves the
+            source unnormalized.
+        chirality : int or None
+            Dominant chirality (+1 or -1) of the photons this source emits,
+            or `None` for no chirality preference.
+        chirality_degree : float
+            Degree of polarization, in `[0, 1]`: 0 draws chirality with no
+            preference (50/50 between the two values), 1 always draws the
+            dominant `chirality`, and values in between interpolate --
+            the fraction of photons actually drawn with the dominant
+            `chirality` is `0.5 + chirality_degree/2`, not
+            `chirality_degree` itself. Defaults to 0 (unpolarized), so a
+            source is unpolarized unless asked otherwise. Ignored if
+            `chirality` is `None`, which is itself the default -- the
+            photon then picks its own chirality at random.
+        """
+
+        # Copied rather than aliased: `NearPointSource(position =
+        # detector.surrounding_circle_center)` is a natural thing to write, and
+        # that hands over the detector's own centre object. Nothing mutates it
+        # today, but sharing it means a future in-place edit would silently move
+        # the detector's geometry.
+        self._position = Cartesian2D(position.x, position.y)
+        self._spectrum = spectrum
+        self._rate = rate
+        self.chirality = chirality
+        self.chirality_degree = chirality_degree
+
+        # Cache for the near-field throwing geometry (aim_angle, Delta, f),
+        # a pure function of `position` (fixed) and the detector. Plain
+        # floats (radians), recomputed only when the detector identity
+        # changes -- see the class docstring and PointSource's analogous
+        # throwing-plane cache.
+        self._detector = None
+        self._aim_angle_rad = None
+        self._half_width_rad = None
+        self._acceptance = None
+
+    @property
+    def spectrum(self):
+        """The source's energy spectrum."""
+        return self._spectrum
+
+    @property
+    def rate(self):
+        """Total emission rate of the source, in `1/s`, or `None`."""
+        return self._rate
+
+    @property
+    def position(self):
+        """Fixed position of the source in the detector frame."""
+        return self._position
+
+    def _update_geometry(self, detector):
+        """
+        (Re)compute and cache the near-field throwing geometry of the class
+        docstring -- `aim_angle`, the half-width `Delta` (or `None` when the
+        source is inside the surrounding circle), and the acceptance
+        fraction `f` -- as plain floats, if `detector` differs from the one
+        the cache was last built for.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector to compute the geometry against.
+        """
+
+        if detector is self._detector:
+            return
+
+        self._detector = detector
+
+        center = detector.surrounding_circle_center
+        length_unit = detector.surrounding_circle_radius.unit
+
+        dx = (center.x - self.position.x).to_value(length_unit)
+        dy = (center.y - self.position.y).to_value(length_unit)
+        s = np.hypot(dx, dy)
+        a = detector.surrounding_circle_radius.to_value(length_unit)
+
+        self._aim_angle_rad = np.arctan2(dy, dx)
+
+        if s >= a:
+            self._half_width_rad = np.arcsin(a / s)
+            self._acceptance = self._half_width_rad / np.pi
+        else:
+            self._half_width_rad = None
+            self._acceptance = 1.0
+
+    def random_photon(self, detector, pose = None, earth = None):
+        """
+        Draw one random photon aimed at the detector.
+
+        This source is fixed in the detector frame, so it never moves with
+        the spacecraft and is never occulted: `pose` and `earth` are
+        accepted only for interface compatibility with `Source.random_photon`
+        and are otherwise ignored completely. Unlike a far-field source,
+        this method never returns `None`.
+
+        The flight direction is drawn per the class docstring: uniformly in
+        `[aim_angle - Delta, aim_angle + Delta]` when the source sits
+        outside the detector's surrounding circle, or uniformly over the
+        full `[0, 360) deg` when it sits inside.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at.
+        pose : `SpacecraftInterval` or None
+            Ignored. Present only for interface compatibility -- this
+            source's geometry is fixed in the detector frame regardless of
+            the spacecraft's pose.
+        earth : `Earth` or None
+            Ignored. Present only for interface compatibility -- this
+            source is never occultable (it is not on the sky).
+
+        Returns
+        -------
+        `Photon`
+            A photon starting at `self.position`, flying along a direction
+            drawn as above, with an energy drawn from `spectrum` and a
+            chirality drawn per `chirality`/`chirality_degree`. Never
+            `None`.
+        """
+
+        self._update_geometry(detector)
+
+        if self._half_width_rad is None:
+            direction = np.random.uniform(0, 360) * u.deg
+        else:
+            offset_rad = np.random.uniform(-self._half_width_rad, self._half_width_rad)
+            # Converted to degrees so both branches -- and every other source
+            # in the package -- hand back the same unit. `Particle.__init__`
+            # preserves whatever unit it is given, so leaving this in radians
+            # is visible downstream, e.g. in `EventList.write` output.
+            direction = ((self._aim_angle_rad + offset_rad) * u.rad).to(u.deg)
+
+        chirality = copy(self.chirality)
+        if chirality is not None:
+            if np.random.uniform() > 0.5 + self.chirality_degree/2:
+                # Flip to non-dominant chirality
+                chirality *= -1
+
+        return Photon(position = self.position,
+                      direction = direction,
+                      energy = self.spectrum.random_energy(),
+                      chirality = chirality)
+
+    def simulated_rate(self, detector, pose = None):
+        """
+        Expected rate of photons launched at the detector: `rate * f`, where
+        `f` is the acceptance fraction of the class docstring (`arcsin(a/s)
+        / pi` outside the surrounding circle, `1` inside it).
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photons are thrown at. Its
+            `surrounding_circle_center` and `surrounding_circle_radius` set
+            the acceptance geometry.
+        pose : `SpacecraftInterval` or None
+            Ignored -- this source's geometry does not depend on the
+            spacecraft's pose. Present only for interface compatibility with
+            `Source.simulated_rate`.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            Rate in `1/s`, or `None` if `rate` is `None` (matching how
+            `FarFieldSource.simulated_rate` treats an unnormalized source).
+        """
+
+        if self.rate is None:
+            return None
+
+        self._update_geometry(detector)
+
+        return self.rate * self._acceptance
+
+class ExtendedSource(FarFieldSource):
+    """
+    A far-field source with a von Mises distribution on the sky, centred at
+    an inertial `sky_angle` with a width `width`.
+
+    Von Mises rather than a (truncated) Gaussian because it wraps around the
+    sky by construction: no truncation parameter is needed, there is no
+    double-counting near `360 deg`, and it is exactly normalized over the
+    circle. `width` is the sigma a user thinks in; it is converted to the
+    von Mises concentration `kappa = 1 / width_rad**2` (`width` in radians)
+    freshly on every draw, in `random_photon` -- so, like `sky_angle`,
+    `chirality` and `chirality_degree`, changing `width` after construction
+    takes effect on the very next photon, with no stale cached value left
+    over from `__init__`. The conversion is exact only in the small-width
+    limit -- for a large `width` the von Mises distribution is measurably
+    wider than a Gaussian of the same nominal sigma would be, and in the
+    `kappa -> 0` limit it becomes the uniform (isotropic) distribution
+    rather than an ever-wider Gaussian. `flux` is the total flux integrated
+    over the whole sky, matching `IsotropicSource` and `PointSource`: at
+    very small `width` this source reproduces a `PointSource` at the same
+    `flux` and `sky_angle`, and at very large `width` it reproduces an
+    `IsotropicSource` at the same `flux`.
+
+    Like `PointSource(sky_angle = ...)`, this is an inertial source: it
+    needs a spacecraft pose to have a detector-frame direction at all, and
+    it is occultable (`occultable` stays `True`, inherited from
+    `FarFieldSource`).
+
+    Internally re-aims a single reusable `PointSource` to a new random
+    off-axis angle for every photon, rather than building a fresh one per
+    draw -- the same pattern `IsotropicSource` uses.
+    """
+
+    def __init__(self, sky_angle, width, spectrum, flux = None,
+                chirality = None, chirality_degree = 0):
+        """
+        Parameters
+        ----------
+        sky_angle : `astropy.units.Quantity`
+            Inertial centre `lambda` of the von Mises distribution (angle
+            units), CCW from inertial +X, pointing toward the centre of the
+            source.
+        width : `astropy.units.Quantity`
+            Width (angle units) of the distribution, in the sense of a
+            Gaussian sigma. Converted internally to the von Mises
+            concentration `kappa = 1 / width_rad**2`; exact only in the
+            small-`width` limit (see the class docstring).
+        spectrum : `Spectrum`
+            The source's energy spectrum shape.
+        flux : `astropy.units.Quantity`, optional
+            Total flux integrated over the whole sky, in `1/cm/s`. `None`
+            (the default) leaves the source unnormalized.
+        chirality : int or None
+            Dominant chirality (+1 or -1) of the photons this source emits,
+            or `None` for no chirality preference.
+        chirality_degree : float
+            Degree of polarization, in `[0, 1]`: 0 draws chirality with no
+            preference (50/50 between the two values), 1 always draws the
+            dominant `chirality`, and values in between interpolate --
+            the fraction of photons actually drawn with the dominant
+            `chirality` is `0.5 + chirality_degree/2`, not
+            `chirality_degree` itself. Defaults to 0 (unpolarized), so a
+            source is unpolarized unless asked otherwise. Ignored if
+            `chirality` is `None`, which is itself the default -- the
+            photon then picks its own chirality at random.
+        """
+
+        self._spectrum = spectrum
+        self.sky_angle = sky_angle
+        self.width = width
+        self.chirality = chirality
+        self.chirality_degree = chirality_degree
+        self._flux = flux
+
+        # Validate eagerly, so a bad width raises where it was set rather
+        # than on the first draw. `width` is public and mutable, so
+        # `random_photon` re-validates on every draw as well.
+        _von_mises_kappa(self.width)
+
+        # A single point source, re-aimed to a new off-axis angle for every
+        # photon, rather than a throw-away PointSource per photon (as
+        # IsotropicSource does). Built in detector-frame mode
+        # (`offaxis_angle`, not `sky_angle`) so re-aiming it is just
+        # assigning `offaxis_angle`, with no occultation logic of its own --
+        # occultation is handled once here, in `random_photon`, on the
+        # sky angle actually drawn.
+        self._point_source = PointSource(offaxis_angle = 0*u.deg,
+                                         spectrum = spectrum,
+                                         chirality = chirality,
+                                         chirality_degree = chirality_degree)
+
+        # Whether this source has been evaluated at a real pose yet, and
+        # (if so) the attitude of the last such pose -- both for `plot`,
+        # which has no pose of its own. The attitude, not the last drawn
+        # photon's off-axis angle, is what `plot` needs: `_point_source
+        # .offaxis_angle` after a draw is a von Mises *sample*, jittering
+        # around the source's true centre from photon to photon, not the
+        # centre itself.
+        self._aimed = False
+        self._last_attitude = None
+
+    @property
+    def spectrum(self):
+        """The source's energy spectrum."""
+        return self._spectrum
+
+    def random_photon(self, detector, pose = None, earth = None):
+        """
+        Draw one random photon from the von Mises sky distribution.
+
+        The inertial sky angle is drawn first, from
+        `scipy.stats.vonmises(kappa, loc = sky_angle)`; occultation is then
+        tested on that same drawn angle; only if it survives is the
+        direction converted to an off-axis angle (`sky_angle_to_offaxis`)
+        and handed to the internal reusable `PointSource`. Drawing first and
+        rejecting after -- the same order `IsotropicSource.random_photon`
+        uses -- means no bespoke truncated-sky sampling is needed, and it
+        keeps the simulator's Poisson mean the *unocculted* one (plan
+        Section 6).
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at.
+        pose : `SpacecraftInterval`
+            Spacecraft pose, supplying the attitude used to convert the
+            drawn sky angle into a detector-frame off-axis angle, and the
+            orbital position used to test occultation. Required -- this is
+            an inertial source with no detector-frame direction without an
+            attitude (unlike `PointSource(offaxis_angle = ...)`, this class
+            has no detector-frame mode at all).
+        earth : `Earth`
+            The Earth to test occultation against. Required whenever `pose`
+            is given, since this source is occultable
+            (`FarFieldSource.occultable`); see `FarFieldSource._occulted`.
+
+        Returns
+        -------
+        `Photon` or None
+            A photon thrown from the drawn off-axis angle, with an energy
+            drawn from `spectrum` and a chirality drawn per
+            `chirality`/`chirality_degree`; `None` if the drawn sky angle
+            was occulted by the Earth at this pose.
+
+        Raises
+        ------
+        ValueError
+            If `pose` is `None`, or if `pose` is given but `earth` is not
+            (see `FarFieldSource._occulted`).
+        """
+
+        if pose is None:
+            raise ValueError(
+                "ExtendedSource is aimed on the inertial sky "
+                f"(sky_angle = {self.sky_angle}), so it needs a spacecraft "
+                "pose to know where that is in the detector frame. Pass "
+                "`pose`.")
+
+        # Re-sync in case these were changed after construction
+        self._point_source.chirality = self.chirality
+        self._point_source.chirality_degree = self.chirality_degree
+
+        # kappa is recomputed from `width` on every draw, like the resync
+        # above, so a `width` changed after construction (or after an
+        # earlier draw) takes effect immediately -- there is no stale
+        # cached value from `__init__` to fall out of sync with it.
+        kappa = _von_mises_kappa(self.width)
+        sky_angle_rad = vonmises.rvs(kappa, loc = self.sky_angle.to_value(u.rad))
+        sky_angle = sky_angle_rad * u.rad
+
+        # Recorded before the occultation test, so that an interval in which
+        # every photon happens to be occulted still leaves `plot` showing this
+        # pose rather than the previous one. `PointSource` does the same.
+        self._last_attitude = pose.attitude
+        self._aimed = True
+
+        if self._occulted(sky_angle, pose, earth):
+            return None
+
+        offaxis_angle = sky_angle_to_offaxis(sky_angle, pose.attitude)
+        self._point_source.offaxis_angle = offaxis_angle
+
+        return self._point_source.random_photon(detector = detector)
+
+    def plot(self, ax, detector, **kwargs):
+        """
+        Draw this source's sky coverage on axes already showing
+        `detector.plot()`.
+
+        Draws the sky circle (`plot_sky_circle`) and an arc
+        (`plot_sky_arc`) centred on this source's *distribution centre* --
+        `sky_angle_to_offaxis(sky_angle, attitude)` at the attitude of the
+        last pose a photon was drawn at -- spanning `4 * width` (i.e. `+-2`
+        sigma, the small-width Gaussian-limit central ~95% interval; not
+        exact for a wide `width`, but a reasonable visual indicator either
+        way). The centre is deliberately *not*
+        `self._point_source.offaxis_angle`: after a draw that is a von
+        Mises *sample*, which jitters from photon to photon and would make
+        the plotted arc jump around the true centre rather than showing it.
+
+        The plot is in the detector frame, so this inertial source can only
+        be drawn once it has been aimed at a pose -- i.e. after at least
+        one `random_photon(detector, pose)` call, the same requirement
+        `PointSource(sky_angle = ...).plot` has.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source is being plotted against; sizes the
+            sky circle and its arc radius.
+        **kwargs
+            Passed through to the arc's `ax.plot` call (`plot_sky_arc`),
+            overriding its default red-line style. The sky circle keeps its
+            own default style regardless.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the source was plotted on.
+
+        Raises
+        ------
+        RuntimeError
+            If this source has not been evaluated at a spacecraft pose yet,
+            so it has no detector-frame off-axis angle to plot.
+        """
+
+        if not self._aimed:
+            raise RuntimeError(
+                "This ExtendedSource is aimed on the inertial sky "
+                f"(sky_angle = {self.sky_angle}) and has not been evaluated "
+                "at a spacecraft pose yet, so it has no detector-frame "
+                "off-axis angle to plot. Draw a photon with a pose first.")
+
+        center_angle = sky_angle_to_offaxis(self.sky_angle, self._last_attitude)
+
+        self.plot_sky_circle(ax, detector)
+        self.plot_sky_arc(ax, detector,
+                          center_angle = center_angle,
+                          extent = min(4 * self.width, 360*u.deg), **kwargs)
 
         return ax

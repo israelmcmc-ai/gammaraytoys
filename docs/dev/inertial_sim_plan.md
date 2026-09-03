@@ -753,11 +753,38 @@ Collected from reading the existing code and probing it. Each has bitten or will
 4. **`det.throwing_plane_size`** appears in tutorials 02, 03 and 06. It stays.
 5. **Near-field sources have a blind wedge.** Because layers are infinitesimal
    planes (constraint 4), a photon whose layer crossings all fall outside
-   `|x| < layer_length/2` never interacts — measured: a source between layers emits
-   at 1° from horizontal and interacts 0% of the time, versus ~47–60% for steep
-   angles. This is correct behaviour under the documented approximation, and it shows
+   `|x| < layer_length/2` never interacts.
+
+   A **truly horizontal** photon emitted between two layers interacts **exactly 0%**
+   of the time, always, for any geometry: it runs parallel to every layer plane and
+   never crosses one. The interesting question is how far from horizontal that stays
+   true, and there is **no single angle** — it depends on the layer length, the
+   separation between layers, and where the source sits. The blind half-angle is
+
+   ```
+   arctan(dy / run)
+   ```
+
+   with `dy` the vertical gap from the source to the nearest layer plane (set by the
+   layer separation and the source's placement between them) and `run` the horizontal
+   distance the photon has before it passes the layer's edge (set by the layer length
+   and the source's horizontal placement).
+
+   Measured on COMPTELito (`layer_length = 10 m`, so edges at `x = ±500 cm`; source
+   0.5 cm above a layer), with the cliff landing exactly where the formula predicts:
+
+   | source at | `run` | predicted cutoff | measured |
+   |---|---|---|---|
+   | `x = 0` (stack centre) | 500 cm | 0.0573° | 99.8% at 0.115°, 0.0% at 0.029° |
+   | `x = 495 cm` (near the edge) | 5 cm | 5.71° | 66.5% at 11.4°, 0.0% at 5.71° |
+
+   Two orders of magnitude apart in angle for the same detector. Quote the formula,
+   not a number.
+
+   This is correct behaviour under the documented approximation, and it shows
    up as reduced efficiency, not as a wrong normalisation. Do not silently work around
-   it; show it in the notebook.
+   it; show it in the notebook — `03-near_and_extended_sources.ipynb` does, as a
+   function of position.
 6. **The isotropic albedo's `1/cos θ` limb divergence** is integrable but real.
    Sampling in sky angle needs a singular pdf; sampling in β does not. Sample in β.
 7. **`Simulator.total_flux`** is asserted on in `tests/test_sims.py`. Decide whether
