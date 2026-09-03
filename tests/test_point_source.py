@@ -541,3 +541,151 @@ def test_isotropic_source_raises_when_given_a_pose_but_no_earth(tracker):
         source.random_photon(tracker, pose = pose, earth = None)
 
     assert 'earth' in str(excinfo.value).lower()
+
+
+# --- Chirality: the dominant-fraction formula and the None / re-sync seams -
+#
+# PointSource.random_photon (source.py) draws chirality so that, when a
+# dominant `chirality` is given, the fraction of drawn photons that actually
+# carry it is
+#     P(dominant) = 0.5 + chirality_degree / 2
+# Every expected count below is that formula evaluated by hand at the
+# chirality_degree used, times n -- never a value read back out of the
+# implementation. Each statistical assertion states the binomial sigma it is
+# built on (sqrt(n p (1-p))) and is checked at 4 sigma, matching
+# tests/test_inertial_simulator.py's house style; the alternative hypothesis
+# each is built to catch is noted alongside it. A 4-sigma-equivalent p-value
+# floor is 6.3e-5 = 2 * (1 - Phi(4)), not 0.01 -- the correction applied to
+# the PR 4 near/extended-sources tests -- and the same standard is used here.
+
+def _assert_matches_binomial_fraction(n_dominant, n, p, note):
+    """4-sigma binomial check: `n_dominant` out of `n` draws against an
+    expected fraction `p` (sigma = sqrt(n p (1-p)))."""
+
+    sigma = np.sqrt(n * p * (1 - p))
+
+    assert abs(n_dominant - n * p) <= 4 * sigma, (
+        f"{note}: {n_dominant}/{n} dominant-chirality draws, expected "
+        f"{n * p:.1f} +/- {4 * sigma:.1f} (4 sigma)")
+
+
+@pytest.mark.parametrize("chirality_degree, expected_p", [
+    (0.0, 0.5),
+    (0.5, 0.75),
+    (1.0, 1.0),
+])
+def test_pointsource_chirality_dominant_fraction_matches_formula(
+        tracker, chirality_degree, expected_p):
+    # Deleting the `chirality *= -1` flip makes every photon dominant
+    # regardless of chirality_degree: at chirality_degree=0.0 that is a jump
+    # from the expected 2000 +/- 126 (4 sigma) to 4000, ~63 sigma away.
+    # Inverting the `>` to `<` flips P(dominant) to 1 - (0.5 + d/2): at
+    # chirality_degree=1.0 the correct fraction is exactly 1.0 (uniform() is
+    # always < 1.0, so the flip never fires) while the inverted comparison
+    # fires on *every* draw, giving exactly 0.0 -- as far from 1.0 as it is
+    # possible to get.
+    n = 4000
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = PointSource(offaxis_angle = 0 * u.deg, spectrum = spec,
+                         flux = 1 / u.cm / u.s,
+                         chirality = 1, chirality_degree = chirality_degree)
+
+    n_dominant = sum(source.random_photon(tracker).chirality == 1 for _ in range(n))
+
+    _assert_matches_binomial_fraction(
+        n_dominant, n, expected_p, f"chirality_degree={chirality_degree}")
+
+
+def test_pointsource_chirality_dominant_fraction_works_for_negative_dominant(tracker):
+    # A bug that hard-coded the dominant value as +1 instead of using
+    # self.chirality would pass every case above (they all use chirality=1)
+    # but fail here: with chirality=-1 the *majority* of photons must be -1,
+    # not +1 -- a fraction of 0.75 dominant vs. the 0.25 such a bug would
+    # give, about (0.75-0.25)*4000 / sigma=27.4 ~= 73 sigma away.
+    n = 4000
+    chirality_degree = 0.5
+    expected_p = 0.75
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = PointSource(offaxis_angle = 0 * u.deg, spectrum = spec,
+                         flux = 1 / u.cm / u.s,
+                         chirality = -1, chirality_degree = chirality_degree)
+
+    n_dominant = sum(source.random_photon(tracker).chirality == -1 for _ in range(n))
+
+    _assert_matches_binomial_fraction(n_dominant, n, expected_p, "chirality=-1")
+
+
+def test_pointsource_chirality_none_lets_the_photon_pick_its_own(tracker):
+    # chirality=None skips the dominant/chirality_degree logic entirely --
+    # random_photon passes chirality=None straight through to `Photon`,
+    # which then draws np.random.choice([1, -1]) itself (event.py) -- so
+    # both values must appear. With n=50 draws, the chance every one lands
+    # the same way by chance is 2 * 0.5**50 ~= 1.8e-15, far below the
+    # 6.3e-5 four-sigma-equivalent floor, so seeing only one value would be
+    # a real failure, not noise.
+    n = 50
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = PointSource(offaxis_angle = 0 * u.deg, spectrum = spec,
+                         flux = 1 / u.cm / u.s, chirality = None)
+
+    chiralities = {source.random_photon(tracker).chirality for _ in range(n)}
+
+    assert chiralities == {1, -1}
+
+
+def test_isotropic_source_chirality_dominant_fraction_matches_formula(tracker):
+    # IsotropicSource.random_photon delegates the actual chirality draw to
+    # its internal PointSource (source.py) -- this exercises that
+    # delegation with the same formula and sigma as the PointSource test
+    # above.
+    n = 4000
+    chirality_degree = 0.5
+    expected_p = 0.75
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = IsotropicSource(spectrum = spec, flux = 1 / u.cm / u.s,
+                             chirality = 1, chirality_degree = chirality_degree)
+
+    n_dominant = sum(source.random_photon(tracker).chirality == 1 for _ in range(n))
+
+    _assert_matches_binomial_fraction(n_dominant, n, expected_p, "IsotropicSource")
+
+
+def test_isotropic_source_resyncs_chirality_degree_after_construction(tracker):
+    # random_photon re-syncs chirality/chirality_degree onto the internal
+    # PointSource on every draw ("Re-sync in case these were changed after
+    # construction", source.py) so that changing them post-construction
+    # takes effect. Built at chirality_degree=0.0 (50/50 -- deterministically
+    # *not* all-dominant over many draws) then bumped to 1.0 before drawing,
+    # which makes every photon dominant. If that re-sync line were removed,
+    # the internal PointSource would still be at the construction-time
+    # chirality_degree=0.0: ~half dominant, i.e. ~2000/4000 instead of the
+    # exact 4000/4000 asserted below -- about 63 sigma off the p=0.5 formula
+    # (sigma = sqrt(4000 * 0.5 * 0.5) = 31.6).
+    n = 4000
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = IsotropicSource(spectrum = spec, flux = 1 / u.cm / u.s,
+                             chirality = 1, chirality_degree = 0.0)
+
+    source.chirality_degree = 1.0
+
+    n_dominant = sum(source.random_photon(tracker).chirality == 1 for _ in range(n))
+
+    assert n_dominant == n
+
+
+def test_isotropic_source_resyncs_chirality_value_after_construction(tracker):
+    # The same re-sync line also carries `chirality` itself -- changing
+    # which value is dominant after construction must take effect too, not
+    # just chirality_degree. chirality_degree=1.0 keeps this deterministic
+    # (see the parametrized formula test above): every photon must switch
+    # from +1 to -1 once `chirality` is changed.
+    n = 500
+    spec = MonoenergeticSpectrum(1 * u.MeV)
+    source = IsotropicSource(spectrum = spec, flux = 1 / u.cm / u.s,
+                             chirality = 1, chirality_degree = 1.0)
+
+    source.chirality = -1
+
+    chiralities = [source.random_photon(tracker).chirality for _ in range(n)]
+
+    assert all(c == -1 for c in chiralities)
