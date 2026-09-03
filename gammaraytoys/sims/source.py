@@ -9,6 +9,8 @@ from copy import copy
 import matplotlib.pyplot as plt
 from histpy import Histogram, Axis
 from scipy.stats import vonmises
+from scipy.integrate import quad, cumulative_trapezoid
+from .earth import Earth
 
 # `ToyTracker2D.plot()` hardcodes its data coordinates to this unit -- every
 # source marker drawn on top of it must match, or it lands in the right
@@ -1733,5 +1735,715 @@ class ExtendedSource(FarFieldSource):
         self.plot_sky_arc(ax, detector,
                           center_angle = center_angle,
                           extent = min(4 * self.width, 360*u.deg), **kwargs)
+
+        return ax
+
+
+# The two emission laws `EarthAlbedoSource` knows how to draw from. Anything
+# else is rejected at construction: silently falling back to one of them would
+# be a factor-of-1.2-ish error in the total rate (at 400 km) and a visibly
+# wrong sky-angle distribution, neither of which announces itself.
+_ALBEDO_LAWS = ('lambertian', 'isotropic')
+
+# Number of samples in the tabulated `beta` grid used to invert the isotropic
+# law's CDF. The pdf `1/s(beta)` is smooth, bounded and monotonic in `|beta|`,
+# so a trapezoidal CDF on this many points is far more accurate than the
+# Poisson noise of any simulation that uses it, and the table is rebuilt only
+# when the orbital radius changes -- once per interval at worst, once per run
+# for a circular orbit.
+_ALBEDO_BETA_GRID_POINTS = 2001
+
+# Tolerance for the internal `lam(beta_max) == rho` consistency check in
+# `EarthAlbedoSource._update_geometry`. The two are algebraically identical
+# (Section 5.6), so any disagreement above floating-point noise means the
+# geometry has been miscoded, not that the orbit is unusual.
+_ALBEDO_GEOMETRY_RTOL = 1e-6
+_ALBEDO_GEOMETRY_ATOL = 1e-9
+
+
+class EarthAlbedoSource(FarFieldSource):
+    """
+    Gamma rays emitted by the Earth's surface -- a stand-in for atmospheric
+    scattering, not a real albedo model.
+
+    **Far field by throwing, near field by sampling.** The Earth is only a
+    few thousand kilometres away, so where on its surface a photon comes
+    from matters and is sampled explicitly; but the detector is
+    ~17 cm across, so once an emission point is chosen the photon is
+    parallel across the whole detector to `O(a/s) ~ 3e-8` and is handed to
+    the ordinary far-field throwing plane, exactly like a source at
+    infinity. It is therefore a `FarFieldSource`, and the one whose
+    normalization is **pose-dependent**: `flux(pose)` and
+    `simulated_rate(detector, pose)` both need a `pose` and raise without
+    one, because the Earth's apparent size, and so the flux it delivers,
+    depends on the orbital radius `r`.
+
+    **Normalization.** The source is normalized by a surface *emissivity*
+    `E` in `1/cm/s`: photons emitted per unit length of Earth surface per
+    second, into the outward half-plane. That is a property of the surface
+    alone, so one `EarthAlbedoSource` means the same physics at any
+    altitude -- unlike a flux, it must not have `r` folded into it.
+
+    **Two emission laws**, chosen with `law`:
+
+    - `'isotropic'`: uniform over the outward half-plane, so emission per
+      unit angle is `E/pi`.
+    - `'lambertian'` (the default): proportional to `cos(theta)` from the
+      local normal, normalized so that `integral of k cos(theta) dtheta = E`
+      over the half-plane, i.e. `k = E/2`.
+
+    Both laws at once means two `EarthAlbedoSource` objects in the same run,
+    each with its own emissivity.
+
+    **Geometry.** With `R_E` the Earth's radius, `r` the orbital radius and
+    `beta` the Earth-central angle of a surface point away from the
+    sub-satellite point:
+
+    ```
+    beta_max  = arccos(R_E / r)                          # visible surface
+    rho       = arcsin(R_E / r)                          # apparent angular radius
+    s(beta)   = sqrt(r^2 + R_E^2 - 2 r R_E cos beta)     # surface point to spacecraft
+    cos theta = (r cos beta - R_E) / s(beta)             # emission angle from the normal
+    lam(beta) = arctan2(R_E sin beta, r - R_E cos beta)  # sky angle away from nadir
+    ```
+
+    `lam(beta_max) == rho` identically -- the visible limb is the edge of
+    the apparent disc -- and `_update_geometry` checks it on every rebuild.
+
+    **Total rates** (see `flux`):
+
+    ```
+    lambertian:  N = 2 a E arcsin(R_E / r)
+    isotropic:   N = (2 a E R_E / pi) integral of dbeta/s(beta), over [-beta_max, beta_max]
+    ```
+
+    **Sampling.** The naive approach -- pick a surface point, pick an
+    isotropic direction, see whether it hits -- has an acceptance of order
+    1e-16, so both laws are importance-sampled instead:
+
+    - *Lambertian* is the easy case and is implemented as such. Its radiance
+      `k = E/2` is independent of angle, so the Earth is a disc of **uniform
+      brightness** and the sky angle is simply drawn uniformly in
+      `[nadir - rho, nadir + rho]`. There is nothing to sample on the
+      surface at all.
+    - *Isotropic* is limb-brightened: its brightness goes as `1/cos theta`,
+      which diverges (integrably) at the limb. It is sampled **in `beta`,
+      never in sky angle**, from `pdf(beta) ~ 1/s(beta)`, and the drawn
+      `beta` is then converted with `lam(beta)`. See `random_photon` for why
+      this is not a detail that can be simplified away.
+
+    **Occultation does not apply.** `occultable` is `False`: every one of
+    this source's photons arrives from the Earth's direction by
+    construction, and a blanket occultation test would reject all of them
+    (Section 8.1 of the plan).
+
+    Like `IsotropicSource` and `ExtendedSource`, this source re-aims a
+    single reusable internal `PointSource` for every photon rather than
+    building a fresh one per draw.
+    """
+
+    def __init__(self, emissivity, spectrum, law = 'lambertian',
+                 chirality = None, chirality_degree = 0, earth = None):
+        """
+        Parameters
+        ----------
+        emissivity : `astropy.units.Quantity`
+            Surface emissivity `E`, in `1/cm/s`: photons emitted per unit
+            length of Earth surface per second, into the outward
+            half-plane. A property of the surface, *not* of the orbit --
+            the same value means the same physics at any altitude. Must be
+            strictly positive; there is no unnormalized mode, unlike the
+            optional `flux` of the other far-field sources.
+        spectrum : `Spectrum`
+            The source's energy spectrum shape.
+        law : str
+            Emission law: `'lambertian'` (the default, proportional to
+            `cos theta` from the local normal) or `'isotropic'` (uniform
+            over the outward half-plane). Anything else raises.
+        chirality : int or None
+            Dominant chirality (+1 or -1) of the photons this source emits,
+            or `None` for no chirality preference.
+        chirality_degree : float
+            Degree of polarization, in `[0, 1]`: 0 draws chirality with no
+            preference (50/50 between the two values), 1 always draws the
+            dominant `chirality`, and values in between interpolate --
+            the fraction of photons actually drawn with the dominant
+            `chirality` is `0.5 + chirality_degree/2`, not
+            `chirality_degree` itself. Defaults to 0 (unpolarized), so a
+            source is unpolarized unless asked otherwise. Ignored if
+            `chirality` is `None`, which is itself the default -- the
+            photon then picks its own chirality at random.
+        earth : `Earth` or None
+            The Earth this source emits *from*. `None` (the default) builds
+            a default `Earth()`.
+
+            Every other source only ever meets an Earth as an obstacle, so
+            it is handed one per photon (`random_photon`'s `earth`
+            argument, Section 5.3). For this source the Earth is the
+            emitter: its radius sets both the normalization and the sampled
+            sky angles, and `flux(pose)` -- called by the simulator with no
+            `earth` in sight -- needs it. Hence this constructor argument.
+            `random_photon` still checks the `earth` it is handed against
+            this one and raises if they disagree, so the source and the
+            simulator cannot silently use two different Earths.
+
+        Raises
+        ------
+        ValueError
+            If `emissivity` is not strictly positive, or `law` is not one of
+            `'lambertian'` / `'isotropic'`.
+        astropy.units.UnitConversionError
+            If `emissivity` is not convertible to `1/cm/s`.
+        """
+
+        self._spectrum = spectrum
+
+        # Geometry cache, keyed on everything it depends on. Initialised
+        # before `law` is assigned, because that setter invalidates it.
+        self._geometry_key = None
+        self._rho_rad = None
+        self._flux_factor = None
+        self._beta_grid = None
+        self._beta_cdf = None
+        self._radius_value = None
+        self._orbit_radius_value = None
+
+        self.emissivity = emissivity
+        self.law = law
+        self.chirality = chirality
+        self.chirality_degree = chirality_degree
+        self.earth = earth if earth is not None else Earth()
+
+        # A single point source, re-aimed for every photon rather than a
+        # throw-away PointSource per photon -- the pattern IsotropicSource
+        # and ExtendedSource already use. Built in detector-frame mode
+        # (`offaxis_angle`), so re-aiming it is a plain assignment and it
+        # runs none of the inertial-source logic of its own; the sky angle
+        # is drawn and converted here.
+        self._point_source = PointSource(offaxis_angle = 0*u.deg,
+                                         spectrum = spectrum,
+                                         chirality = chirality,
+                                         chirality_degree = chirality_degree)
+
+        # The last pose a photon was drawn at, for `plot`, which has no pose
+        # of its own. `None` until this source has been evaluated at one.
+        self._last_pose = None
+
+    @property
+    def spectrum(self):
+        """The source's energy spectrum."""
+        return self._spectrum
+
+    @property
+    def emissivity(self):
+        """
+        Surface emissivity `E`, in `1/cm/s`.
+
+        Photons per unit length of Earth surface per second, into the
+        outward half-plane, independent of the orbit. Assigning to it
+        re-validates; the geometry cache does not depend on it, so a new
+        emissivity takes effect on the very next `flux` or photon.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            The emissivity, in whatever units it was given.
+
+        Raises
+        ------
+        ValueError
+            If the new value is not strictly positive (zero, negative or
+            NaN).
+        astropy.units.UnitConversionError
+            If the new value is not convertible to `1/cm/s`.
+        """
+        return self._emissivity
+
+    @emissivity.setter
+    def emissivity(self, emissivity):
+
+        # Also the units check: a value that is not a surface emissivity
+        # raises here rather than several layers down inside `flux`.
+        emissivity_value = emissivity.to_value(1/u.cm/u.s)
+
+        if not emissivity_value > 0:
+            raise ValueError(
+                "EarthAlbedoSource needs a strictly positive emissivity, got "
+                f"{emissivity}. A zero or negative surface emissivity is not a "
+                "source; drop the source from the run instead.")
+
+        self._emissivity = emissivity
+
+    @property
+    def law(self):
+        """
+        Emission law at the surface: `'lambertian'` or `'isotropic'`.
+
+        Assigning to it re-validates and invalidates the cached geometry, so
+        switching laws on a live source is safe (though two laws in one run
+        means two source objects, each with its own emissivity).
+
+        Returns
+        -------
+        str
+            One of `_ALBEDO_LAWS`.
+
+        Raises
+        ------
+        ValueError
+            If the new value is not one of `'lambertian'` / `'isotropic'`.
+        """
+        return self._law
+
+    @law.setter
+    def law(self, law):
+
+        if law not in _ALBEDO_LAWS:
+            raise ValueError(
+                f"Unknown Earth albedo emission law {law!r}. Use one of "
+                f"{_ALBEDO_LAWS}. Both laws in one run means two "
+                "EarthAlbedoSource objects, each with its own emissivity.")
+
+        self._law = law
+
+        # The cached rate factor and sampling table are law-specific.
+        self._geometry_key = None
+
+    @property
+    def occultable(self):
+        """
+        Whether this source's photons can be blocked by the Earth: never.
+
+        Overrides `FarFieldSource.occultable` to `False` (trap 8.1). Every
+        photon from this source leaves the Earth's surface and arrives from
+        within `rho` of nadir *by construction*, so the blanket far-field
+        occultation test -- "is this direction within `rho` of nadir?" --
+        would reject the entire source. The Earth's shadowing of its own far
+        side is already in the sampling, which only ever draws `|beta| <
+        beta_max`, i.e. surface points actually visible from the spacecraft.
+
+        Returns
+        -------
+        bool
+            `False` -- Earth occultation never applies to this source.
+        """
+        return False
+
+    def _check_earth(self, earth):
+        """
+        Check that an `Earth` handed in per-photon is the one this source
+        emits from.
+
+        Parameters
+        ----------
+        earth : `Earth`
+            The Earth passed to `random_photon`, normally the simulator's.
+
+        Raises
+        ------
+        ValueError
+            If its radius differs from `self.earth`'s. Two different radii
+            would mean the sampled surface and the simulated world disagree
+            -- silently, and only in the normalization and the width of the
+            albedo's sky patch, which is exactly the kind of mismatch
+            Section 5.3 passes the Earth explicitly to avoid.
+        """
+
+        if earth is self.earth:
+            return
+
+        if earth.radius != self.earth.radius:
+            raise ValueError(
+                f"This EarthAlbedoSource emits from an Earth of radius "
+                f"{self.earth.radius}, but was handed one of radius "
+                f"{earth.radius}. The albedo's normalization and its sky "
+                "patch both come from that radius, so the two must be the "
+                "same Earth: build the source with "
+                "`EarthAlbedoSource(..., earth = <the simulator's Earth>)`.")
+
+    def _update_geometry(self, orbit_radius):
+        """
+        Recompute, if needed, everything that depends only on the orbital
+        radius (and the Earth and the law): the apparent angular radius
+        `rho`, the visible-surface half-angle `beta_max`, the dimensionless
+        factor turning the emissivity into a flux, and -- for the isotropic
+        law -- the tabulated CDF the `beta` sampler inverts.
+
+        All of it is constant for a circular orbit and changes only per
+        interval otherwise, so it is cached on the key it depends on and
+        this is a comparison of four numbers on all but the first call.
+        The same single-entry cache pattern `NearPointSource
+        ._update_geometry` uses.
+
+        Everything here is computed as plain floats in the Earth's own
+        radius unit, not as `Quantity` objects: it sits one call away from
+        the per-photon path (see Section 3.5 of the plan).
+
+        Parameters
+        ----------
+        orbit_radius : `astropy.units.Quantity`
+            Spacecraft orbital radius `r` (length units), from the pose.
+
+        Raises
+        ------
+        ValueError
+            If `orbit_radius` does not exceed the Earth's radius -- the
+            spacecraft would be at or below the surface, and every formula
+            here would silently return `nan` instead
+            (`Earth._check_orbit_radius`).
+        RuntimeError
+            If the internal `lam(beta_max) == rho` identity fails, which can
+            only mean this geometry has been miscoded.
+        """
+
+        earth = self.earth
+        length_unit = earth.radius.unit
+
+        radius_value = earth.radius.value
+        orbit_radius_value = orbit_radius.to_value(length_unit)
+
+        key = (self._law, length_unit, radius_value, orbit_radius_value)
+
+        if key == self._geometry_key:
+            return
+
+        earth._check_orbit_radius(orbit_radius_value, orbit_radius)
+
+        re = radius_value
+        r = orbit_radius_value
+
+        # `rho = arcsin(R_E/r)` comes from the Earth rather than being
+        # rewritten here, so the albedo's apparent disc and the occultation
+        # test other sources get cannot drift apart.
+        rho = earth._angular_radius_rad(r)
+        beta_max = np.arccos(re / r)
+
+        # 1/s(beta), the isotropic law's unnormalized pdf in beta. Smooth
+        # and bounded -- `s >= r - R_E > 0` -- for both its uses below.
+        #
+        # `s^2 = (r - R_E)^2 + 4 r R_E sin^2(beta/2)` is the same number as
+        # Section 5.6's `r^2 + R_E^2 - 2 r R_E cos beta`, but computed
+        # without the catastrophic cancellation the literal form suffers
+        # when `r` is very close to `R_E`: there it loses every significant
+        # digit of `r - R_E` and returns `s(0) = 0` exactly, which turns the
+        # pdf into `inf` and the normalized CDF into `nan` -- silently, so
+        # every sampled sky angle would come out `nan`. Written this way the
+        # smallest value it can produce is `(r - R_E)^2 > 0`.
+        def inverse_distance(beta):
+            return 1 / np.sqrt((r - re)**2 + 4 * r * re * np.sin(beta/2)**2)
+
+        if self._law == 'lambertian':
+            # N = 2 a E arcsin(R_E/r), so flux = N / 2a = E rho.
+            flux_factor = rho
+            beta_grid = None
+            beta_cdf = None
+        else:
+            # N = (2 a E R_E / pi) integral of dbeta/s(beta), so
+            # flux = N / 2a = E (R_E/pi) integral. No elementary closed
+            # form; `quad` on a smooth even integrand, once per radius.
+            integral = quad(inverse_distance, -beta_max, beta_max)[0]
+            flux_factor = re * integral / np.pi
+
+            # Inverse-transform table for pdf(beta) ~ 1/s(beta). Sampling
+            # in beta rather than in sky angle is the whole point; see
+            # `random_photon`.
+            beta_grid = np.linspace(-beta_max, beta_max, _ALBEDO_BETA_GRID_POINTS)
+            beta_cdf = cumulative_trapezoid(inverse_distance(beta_grid),
+                                            beta_grid, initial = 0)
+            beta_cdf /= beta_cdf[-1]
+
+        # The visible limb is the edge of the apparent disc: the surface
+        # point at beta_max is seen exactly rho from nadir. Algebraically
+        # identical (Section 5.6), so a mismatch is a coding error.
+        limb_sky_angle = np.arctan2(re * np.sin(beta_max),
+                                    r - re * np.cos(beta_max))
+
+        if not np.isclose(limb_sky_angle, rho,
+                          rtol = _ALBEDO_GEOMETRY_RTOL,
+                          atol = _ALBEDO_GEOMETRY_ATOL):
+            raise RuntimeError(
+                "EarthAlbedoSource geometry is inconsistent: the visible limb "
+                f"(beta_max = {beta_max} rad) is at a sky angle of "
+                f"{limb_sky_angle} rad from nadir, but the Earth's apparent "
+                f"angular radius is {rho} rad. These are the same number "
+                "analytically; this is a bug.")
+
+        self._rho_rad = rho
+        self._flux_factor = flux_factor
+        self._beta_grid = beta_grid
+        self._beta_cdf = beta_cdf
+        self._radius_value = re
+        self._orbit_radius_value = r
+
+        self._geometry_key = key
+
+    def flux(self, pose = None):
+        """
+        Flux integrated over the whole sky, in `1/cm/s`, at this pose.
+
+        The one far-field source whose flux depends on the pose: the Earth
+        subtends more sky, and delivers more photons, the lower the orbit.
+        In terms of the total rate `N` of Section 5.6 and the throwing-plane
+        size `2a`, this is `N / 2a`:
+
+        ```
+        lambertian:  flux = E arcsin(R_E / r)
+        isotropic:   flux = (E R_E/pi) integral of dbeta/s(beta), over [-beta_max, beta_max]
+        ```
+
+        The lambertian form is closed; the isotropic one is a `quad`,
+        cached on the orbital radius (`_update_geometry`).
+
+        Parameters
+        ----------
+        pose : `SpacecraftInterval`
+            Spacecraft pose, for its `orbit_radius`. Required -- unlike
+            every other far-field source, this one has no pose-free flux.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            Flux in `1/cm/s`. Never `None`: `emissivity` is required and
+            strictly positive, so this source is always normalized.
+
+        Raises
+        ------
+        ValueError
+            If `pose` is `None`, or if the pose's `orbit_radius` does not
+            exceed the Earth's radius.
+        """
+
+        if pose is None:
+            raise ValueError(
+                "EarthAlbedoSource's flux depends on how much sky the Earth "
+                "fills, and so on the spacecraft's orbital radius: there is no "
+                "pose-free value. Pass `pose` (and, for `simulated_rate`, call "
+                "it as `simulated_rate(detector, pose)`). This source has no "
+                "detector-frame mode.")
+
+        self._update_geometry(pose.orbit_radius)
+
+        return (self.emissivity * self._flux_factor).to(1/u.cm/u.s)
+
+    @property
+    def normalization(self):
+        """
+        Total normalization used to scale the spectrum: the emissivity.
+
+        `FarFieldSource.normalization` is `flux()`, evaluated with no pose
+        -- which this source cannot provide, since its flux is meaningless
+        without an orbital radius. The emissivity is the pose-free quantity
+        that scales this source's spectrum, and it is in the same `1/cm/s`
+        as any other far-field normalization, so `diff_flux`,
+        `integrate_flux`, `discretize_spectrum` and `plot_spectrum` all
+        keep working; they just describe emission per unit length of Earth
+        surface rather than flux at the spacecraft. For the flux at a given
+        pose, call `flux(pose)`.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            `emissivity`, in `1/cm/s`.
+        """
+        return self.emissivity
+
+    def _random_sky_offset(self):
+        """
+        Draw one photon's arrival direction, as a signed angle away from
+        nadir, in radians.
+
+        Assumes `_update_geometry` has already run for the current pose.
+
+        Returns
+        -------
+        float
+            Sky angle relative to nadir, in radians, within `+-rho`.
+        """
+
+        if self._law == 'lambertian':
+            # Uniform-brightness disc: uniform on [-rho, rho], with no
+            # surface sampling at all.
+            return np.random.uniform(-1, 1) * self._rho_rad
+
+        # Isotropic: draw the emission point, as beta, from the tabulated
+        # pdf ~ 1/s(beta), then map it onto the sky.
+        beta = np.interp(np.random.uniform(), self._beta_cdf, self._beta_grid)
+
+        return np.arctan2(self._radius_value * np.sin(beta),
+                          self._orbit_radius_value
+                          - self._radius_value * np.cos(beta))
+
+    def random_photon(self, detector, pose = None, earth = None):
+        """
+        Draw one random photon from the Earth's surface.
+
+        A sky angle relative to nadir is drawn from the emission law (see
+        below), turned into an inertial sky angle with
+        `nadir = orbit_angle + 180 deg` -- the same nadir convention
+        `Earth._is_occulted` uses -- and then into an off-axis angle with
+        `Nu = A - lambda`, which the reusable internal `PointSource` throws
+        from. There is no occultation step and no rejection: `occultable`
+        is `False`, and every direction drawn comes from a surface point
+        that is visible from this pose by construction, so this never
+        returns `None`.
+
+        How the sky angle is drawn depends on the law:
+
+        - **lambertian**: uniformly on `[-rho, rho]`. The radiance
+          `k = E/2` does not depend on angle, so the Earth is a disc of
+          uniform brightness and there is nothing to sample on the surface.
+        - **isotropic**: `beta` is drawn from `pdf(beta) ~ 1/s(beta)` by
+          inverting the tabulated CDF, and converted with
+          `lam(beta) = arctan2(R_E sin beta, r - R_E cos beta)`.
+
+        **The isotropic law is sampled in `beta`, never in sky angle**, and
+        this is not a detail that can be simplified away (trap 8.6). Its
+        brightness goes as `1/cos theta`, where `theta` is the emission
+        angle at the *surface point* -- and at the visible limb the line of
+        sight is tangent to the surface, so `theta` is exactly 90 deg and
+        `cos theta` exactly 0. Substituting `beta_max = arccos(R_E/r)` into
+        `cos theta = (r cos beta - R_E)/s` gives `(R_E - R_E)/s = 0`
+        identically, with no dependence on `r`: being higher up shrinks the
+        apparent disc `rho` but does **not** soften the divergence. (It is
+        integrable, going as `eps^(-1/2)`, so the total rate is finite --
+        but a sampler in sky angle would still need a singular pdf.)
+        Sampling in `beta` never evaluates `1/cos theta` at all: the surface
+        measure cancels it, leaving `pdf(beta) ~ 1/s(beta)`, which is
+        smooth and bounded with `s >= r - R_E > 0`.
+
+        The sign convention for `beta` is free -- the pdf is even in it, so
+        the resulting sky angles are symmetric about nadir either way --
+        and is fixed here so that positive `beta` gives a positive sky
+        offset, i.e. the surface point sits at inertial angle
+        `orbit_angle - beta`.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector the photon is thrown at.
+        pose : `SpacecraftInterval`
+            Spacecraft pose, supplying `orbit_radius` (how much sky the
+            Earth fills), `orbit_angle` (where nadir is) and `attitude`
+            (where nadir is in the detector frame). Required -- this source
+            emits from the Earth and has no detector-frame mode at all.
+        earth : `Earth`
+            The Earth to emit from. Required, and checked against the one
+            this source was built with (`_check_earth`). Note that this is
+            *not* for occultation, which never applies here: the Earth's
+            radius is what sets the sampled sky angles.
+
+        Returns
+        -------
+        `Photon`
+            A photon thrown from the drawn off-axis angle, with an energy
+            drawn from `spectrum` and a chirality drawn per
+            `chirality`/`chirality_degree`. Never `None` -- this source's
+            photons are never occulted.
+
+        Raises
+        ------
+        ValueError
+            If `pose` or `earth` is `None`, if `earth` disagrees with the
+            one this source emits from, or if the pose's `orbit_radius`
+            does not exceed the Earth's radius.
+        """
+
+        if pose is None:
+            raise ValueError(
+                "EarthAlbedoSource emits from the Earth's surface, so it needs "
+                "a spacecraft pose to know where the Earth is and how much sky "
+                "it fills. Pass `pose`. This source has no detector-frame "
+                "mode.")
+
+        if earth is None:
+            raise ValueError(
+                "EarthAlbedoSource needs an `earth` -- not to test occultation "
+                "against (it is not occultable), but because the Earth is what "
+                "it emits from: its radius sets the sampled sky angles. Pass "
+                "the same `Earth` the rest of the run uses.")
+
+        self._check_earth(earth)
+
+        # Re-sync in case these were changed after construction
+        self._point_source.chirality = self.chirality
+        self._point_source.chirality_degree = self.chirality_degree
+
+        self._update_geometry(pose.orbit_radius)
+
+        # Recorded before the draw, so `plot` shows this pose even if
+        # something below raises. PointSource and ExtendedSource do the same.
+        self._last_pose = pose
+
+        # Nadir points from the spacecraft back at the Earth's centre:
+        # `orbit_angle + 180 deg`, matching `Earth._is_occulted`.
+        nadir = pose.orbit_angle + 180*u.deg
+        sky_angle = nadir + self._random_sky_offset() * u.rad
+
+        self._point_source.offaxis_angle = sky_angle_to_offaxis(sky_angle,
+                                                                pose.attitude)
+
+        return self._point_source.random_photon(detector = detector)
+
+    def plot(self, ax, detector, **kwargs):
+        """
+        Draw this source's sky coverage on axes already showing
+        `detector.plot()`.
+
+        Draws the sky circle (`plot_sky_circle`) and an arc
+        (`plot_sky_arc`) spanning the Earth's full apparent diameter,
+        `2 rho`, centred on nadir in the detector frame -- i.e. exactly the
+        patch of sky the photons come from, since every drawn sky angle is
+        within `rho` of nadir. Both the centre and the extent come from the
+        last pose a photon was drawn at, since `rho` depends on the orbital
+        radius and nadir on the orbital angle and the attitude.
+
+        The plot is in the detector frame, so this source can only be drawn
+        once it has been evaluated at a pose -- the same requirement
+        `PointSource(sky_angle = ...)` and `ExtendedSource` have.
+
+        Parameters
+        ----------
+        ax : `matplotlib.axes.Axes`
+            Axes already showing the detector, typically from
+            `detector.plot()`.
+        detector : `ToyTracker2D`
+            The detector this source is being plotted against; sizes the
+            sky circle and its arc radius.
+        **kwargs
+            Passed through to the arc's `ax.plot` call (`plot_sky_arc`),
+            overriding its default red-line style. The sky circle keeps its
+            own default style regardless.
+
+        Returns
+        -------
+        `matplotlib.axes.Axes`
+            The axes the source was plotted on.
+
+        Raises
+        ------
+        RuntimeError
+            If this source has not been evaluated at a spacecraft pose yet,
+            so it has no detector-frame direction to nadir to plot.
+        """
+
+        if self._last_pose is None:
+            raise RuntimeError(
+                "This EarthAlbedoSource has not been evaluated at a spacecraft "
+                "pose yet, so it has no detector-frame nadir direction, and no "
+                "apparent Earth size, to plot. Draw a photon with a pose "
+                "first.")
+
+        pose = self._last_pose
+
+        self._update_geometry(pose.orbit_radius)
+
+        nadir = pose.orbit_angle + 180*u.deg
+        center_angle = sky_angle_to_offaxis(nadir, pose.attitude)
+
+        self.plot_sky_circle(ax, detector)
+        self.plot_sky_arc(ax, detector,
+                          center_angle = center_angle,
+                          extent = 2 * (self._rho_rad * u.rad).to(u.deg),
+                          **kwargs)
 
         return ax
