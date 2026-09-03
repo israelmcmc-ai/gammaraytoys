@@ -48,6 +48,11 @@ jobs:
     # for that coverage -- it should eventually be replaced by proper
     # lightweight unit tests exercising the same code paths, but running
     # the real notebooks is fine for now.
+    #
+    # The glob below is deliberately non-recursive. docs/examples/cosimita/slow/
+    # holds long-running notebooks -- minutes each, real simulations to a few
+    # hundred triggered events per panel -- which are not worth gating a push
+    # on. See that directory's README before moving anything into or out of it.
     needs: test
     runs-on: ubuntu-latest
     steps:
