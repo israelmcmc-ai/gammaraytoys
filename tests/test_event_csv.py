@@ -1,10 +1,6 @@
 """Tests for event CSV I/O (`docs/dev/inertial_sim_plan.md`, Section 6,
 PR 6 entry in Section 7).
 
-Sizing note, matching the house style of `tests/test_earth_albedo.py` and
-`tests/test_near_and_extended_sources.py`: every statistical assertion below
-states the sigma it is built on. There is no KS test in this file.
-
 `true_sky_angle_deg` recovery (items 11-13 of the PR 6 test brief) is
 checked against `lambda = A - Nu`, wrapped to `[-180, 180)`, computed here
 with a *separate* implementation from `gammaraytoys.sims.event_csv`'s own
@@ -21,10 +17,11 @@ import astropy.units as u
 
 from gammaraytoys import ToyTracker2D
 from gammaraytoys.sims import (Earth, EarthAlbedoSource, ExtendedSource,
-                               IsotropicSource, MonoenergeticSpectrum,
-                               NearPointSource, PointSource, SpacecraftHistory,
-                               read_event_csv, write_event_csv)
+                               InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
+                               NearPointSource, PointSource, SimpleTraditionalReconstructor,
+                               SpacecraftHistory, read_event_csv, write_event_csv)
 from gammaraytoys.sims.event import Photon
+from gammaraytoys.sims.event_csv import _attitude_at, _attitude_lookup_table
 from gammaraytoys.sims.reco import RecoCompton
 from gammaraytoys.coordinates import Cartesian2D
 
@@ -296,24 +293,93 @@ def _varying_attitude_history(earth, orbit_radius_km, n_intervals=6, interval_s=
     return history
 
 
+def test_attitude_at_owns_start_time_and_clamps_before_the_first_row():
+    # Direct unit tests of `_attitude_at`/`_attitude_lookup_table`
+    # themselves, at the exact boundary values where the three surviving
+    # mutations the coordinator found show up:
+    #   M3: `_attitude_lookup_table` keyed on mid_time instead of
+    #       start_time -- caught by checking exactly AT each interval's
+    #       own start_time, which mid_time-keying gets wrong for every
+    #       interval but the first.
+    #   M4: `side='left'` -- caught the same way `TabulatedScaling`'s
+    #       breakpoint-ownership test catches it: AT start_time must give
+    #       the NEW (this) interval's attitude, not the previous one.
+    #   M5: the clamp removed -- caught by a time before the very first
+    #       row, which must clamp rather than raise or wrap around
+    #       (Python's negative-index wraparound would otherwise silently
+    #       return the LAST row's attitude).
+    history = _varying_attitude_history(_FAR_EARTH, _FAR_ORBIT_RADIUS_KM)
+    intervals = list(history)
+    start_times_s, attitudes_deg = _attitude_lookup_table(history)
+
+    eps = 1e-6
+
+    for i, interval in enumerate(intervals):
+        start_s = interval.start_time.to_value(u.s)
+        stop_s = interval.stop_time.to_value(u.s)
+        this_attitude = interval.attitude.to_value(u.deg)
+
+        # AT this interval's own start_time -> THIS interval's attitude
+        # (owned by the row at it, not the previous one).
+        assert _attitude_at(start_s, start_times_s, attitudes_deg) == pytest.approx(this_attitude)
+
+        # Just before this interval's own stop_time -> still THIS
+        # interval's attitude (flat, right-continuous on
+        # [start_time, stop_time)).
+        assert _attitude_at(stop_s - eps, start_times_s, attitudes_deg) == pytest.approx(this_attitude)
+
+        # Just before this interval's own start_time (every interval but
+        # the first) -> the PREVIOUS interval's attitude, not this one.
+        if i > 0:
+            previous_attitude = intervals[i - 1].attitude.to_value(u.deg)
+            assert _attitude_at(start_s - eps, start_times_s, attitudes_deg) == pytest.approx(
+                previous_attitude)
+
+    # Before the very first row -> clamps to the first interval's
+    # attitude; never extrapolates, never raises, never wraps around to
+    # the last row.
+    first_attitude = intervals[0].attitude.to_value(u.deg)
+    far_before_s = intervals[0].start_time.to_value(u.s) - 1.0e6
+    assert _attitude_at(far_before_s, start_times_s, attitudes_deg) == pytest.approx(first_attitude)
+    assert _attitude_at(far_before_s, start_times_s, attitudes_deg) != pytest.approx(
+        intervals[-1].attitude.to_value(u.deg))
+
+
 def _draw_events(source, detector, history, earth, n_per_interval=60):
     """Draw `n_per_interval` photons from `source` at every interval of
-    `history` (skipping any the Earth occults), each timestamped at its own
-    interval's `mid_time` so the attitude that drew it and the attitude
-    `write_event_csv` will look up for it are unambiguously the same
-    interval. Returns `(events, expected_sky_angle_deg)`, the second being
-    the *drawn* attitude for each surviving photon, from the exact interval
-    object used -- never from a timestamp search."""
+    `history` (skipping any the Earth occults), each timestamped UNIFORMLY
+    over its own interval's `[start_time, stop_time)` span -- matching how
+    `InertialSimulator.run_events` actually timestamps photons
+    (`inertial_simulator.py`: "uniform over the interval's full span"), not
+    pinned to `mid_time`.
+
+    An earlier version of this helper pinned every timestamp to
+    `interval.mid_time`, which is always safely inside `[start_time,
+    stop_time)` and so never exercises `_attitude_at`'s interval-boundary
+    search at all -- exactly the PR 5 lesson recorded in
+    `.claude/cosimita-progress.md`: "isolating one effect can delete the
+    effect you meant to test." Drawing uniformly means a photon can land
+    arbitrarily close to either boundary of its interval, which is where a
+    wrong `searchsorted` side or a missing clamp actually shows up.
+
+    Returns `(events, expected_sky_angle_deg)`, the second being the
+    *drawn* interval's own attitude for each surviving photon, known
+    directly from the `SpacecraftInterval` object used to draw it -- never
+    from re-running any timestamp search."""
 
     events = []
     attitudes_deg = []
 
     for interval in history:
+        start_s = interval.start_time.to_value(u.s)
+        stop_s = interval.stop_time.to_value(u.s)
+
         for _ in range(n_per_interval):
             photon = source.random_photon(detector, pose=interval, earth=earth)
             if photon is None:
                 continue  # occulted; never launched, never written
-            events.append((interval.mid_time, source, photon, _untriggered()))
+            time_s = np.random.uniform(start_s, stop_s)
+            events.append((time_s * u.s, source, photon, _untriggered()))
             attitudes_deg.append(interval.attitude.to_value(u.deg))
 
     return events, np.array(attitudes_deg)
@@ -470,3 +536,141 @@ def test_true_sky_angle_deg_nan_for_detector_frame_point_source_even_with_histor
 
     assert len(table) == 30
     assert np.all(np.isnan(table['true_sky_angle_deg'].to_numpy()))
+
+
+def test_true_sky_angle_deg_uses_the_documented_180_convention(tmp_path):
+    # Every comparison above checks `true_sky_angle_deg` against an
+    # independently computed value modulo 360 (via `_wrap180` on the
+    # DIFFERENCE), which cannot tell the documented [-180, 180) convention
+    # apart from a plain `angle % 360.0` -- 200.0 and -160.0 are congruent
+    # mod 360, so a diff-based check passes either way. This test compares
+    # the literal returned number instead.
+    #
+    # attitude = 0 deg (fixed), source at sky_angle = 200 deg: the RAW
+    # difference A - Nu is -160 deg (worked out below from the project's
+    # Nu = A - lambda convention), which the documented range must report
+    # as -160.0, not its mod-360 equivalent 200.0.
+    detector = _make_tracker()
+    earth = _FAR_EARTH
+    history = SpacecraftHistory(time=[0.0, 1000.0] * u.s,
+                                orbit_radius=[_FAR_ORBIT_RADIUS_KM] * 2 * u.km,
+                                orbit_angle=[0.0, 0.0] * u.deg,
+                                attitude=[0.0, 0.0] * u.deg,
+                                uptime=[1000.0, 0.0] * u.s,
+                                earth=earth)
+    interval = next(iter(history))
+
+    source = PointSource(sky_angle=200 * u.deg, spectrum=SPECTRUM, flux=1 / u.cm / u.s)
+    photon = source.random_photon(detector, pose=interval, earth=earth)
+    assert photon is not None  # not occulted at this orbit radius
+
+    # Sanity check on the setup, independent of write_event_csv: Nu =
+    # wrap(A - lambda) = wrap(0 - 200) = wrap(-200) = 160 deg, so the
+    # photon flies along 270 - 160 = 110 deg.
+    assert photon.direction.to_value(u.deg) == pytest.approx(110.0)
+
+    events = [(interval.mid_time, source, photon, _untriggered())]
+
+    path = tmp_path / 'events.csv'
+    write_event_csv(path, events, spacecraft_history=history)
+    _, table = read_event_csv(path)
+
+    sky = table['true_sky_angle_deg'].iloc[0]
+    assert sky == pytest.approx(-160.0)
+    assert -180.0 <= sky < 180.0
+
+
+# ===========================================================================
+# Part C -- a real InertialSimulator.run_events() stream, and the two
+# write_event_csv defects fix commit 546d840 addresses
+# ===========================================================================
+
+def test_write_event_csv_accepts_a_real_run_events_stream(tmp_path):
+    # The module docstring's own "typical use" -- piping
+    # InertialSimulator.run_events() straight into write_event_csv -- was
+    # never exercised: every other test in this file hand-builds its event
+    # tuples. This closes that gap together with the uniform-timestamp
+    # fix above, since run_events() itself draws timestamps uniformly over
+    # each interval's span (inertial_simulator.py), so this is the same
+    # attitude-lookup stress test as `_draw_events`, but through the real
+    # simulator end to end.
+    np.random.seed(20260907)
+
+    detector = _make_tracker()
+    history = _varying_attitude_history(_FAR_EARTH, _FAR_ORBIT_RADIUS_KM)
+
+    # mu = flux * throwing_plane_size * total_livetime (Sections 5.2, 6);
+    # solved here for a target of ~300 unocculted photons over the whole
+    # run, so the run finishes quickly but still leaves enough rows to make
+    # the per-row check below meaningful.
+    target_mu = 300.0
+    flux = (target_mu / (detector.throwing_plane_size * history.total_livetime)).to(1 / u.cm / u.s)
+    source = ExtendedSource(sky_angle=40 * u.deg, width=25 * u.deg, spectrum=SPECTRUM, flux=flux)
+
+    simulator = InertialSimulator(detector=detector, sources=[source],
+                                  reconstructor=SimpleTraditionalReconstructor(),
+                                  spacecraft_history=history, earth=_FAR_EARTH)
+
+    path = tmp_path / 'run.csv'
+    write_event_csv(path, simulator.run_events(progress=False),
+                    source_names={source: 'crab'}, ori_file='test.ori',
+                    total_livetime=history.total_livetime, spacecraft_history=history)
+
+    metadata, table = read_event_csv(path)
+
+    assert len(table) > 100  # sigma(300) = 17.3; a handful of rows would be a real failure
+    assert metadata['nsim'] == {'crab': len(table)}  # nothing occulted at this orbit radius
+
+    # Independent per-photon attitude, from a plain linear scan over the
+    # history's own intervals (not `_attitude_at`'s vectorized
+    # searchsorted) -- a different algorithm, so a bug shared between the
+    # two would have to be a genuinely shared one.
+    intervals = list(history)
+
+    def owning_interval(time_s):
+        for interval in intervals:
+            if interval.start_time.to_value(u.s) <= time_s < interval.stop_time.to_value(u.s):
+                return interval
+        return intervals[0] if time_s < intervals[0].start_time.to_value(u.s) else intervals[-1]
+
+    expected_attitude_deg = np.array([owning_interval(t).attitude.to_value(u.deg)
+                                      for t in table['time_s'].to_numpy()])
+
+    expected_sky_deg = _independent_expected_sky_angle_deg(
+        expected_attitude_deg, table['true_offaxis_angle_deg'].to_numpy())
+
+    diff_deg = _wrap180(table['true_sky_angle_deg'].to_numpy() - expected_sky_deg)
+    assert np.max(np.abs(diff_deg)) < 1e-6
+
+
+def test_source_label_with_hash_raises_at_write_time(tmp_path):
+    # Regression for fix commit 546d840: `read_event_csv` parses with
+    # `comment = '#'`, which truncates an unquoted field at the first '#'
+    # and silently NaNs every column after it in that row -- while the
+    # '#'-bearing name survives intact in the header's own `nsim`, leaving
+    # the file inconsistent with itself and no error anywhere. Now refused
+    # at write time, naming the source.
+    source = PointSource(sky_angle=0 * u.deg, spectrum=SPECTRUM, flux=1 / u.cm / u.s)
+    events = [(0.0 * u.s, source, _photon(0, 0, 0, 1, 1), _untriggered())]
+
+    path = tmp_path / 'events.csv'
+    with pytest.raises(ValueError):
+        write_event_csv(path, events, source_names={source: 'crab#1'})
+
+
+def test_path_like_ori_file_round_trips(tmp_path):
+    # Regression for fix commit 546d840: a `pathlib.Path` ori_file used to
+    # serialize with `yaml.dump`'s Python-specific
+    # `!!python/object/apply:pathlib.PosixPath` tag, which
+    # `yaml.safe_load` (what `read_event_csv` parses the header with)
+    # refuses to construct -- the file could never be read back at all.
+    # `ori_file` is now str()-coerced before it reaches the dumper.
+    ori_path = tmp_path / 'iss.ori'  # a genuine pathlib.Path, not a str
+
+    path = tmp_path / 'events.csv'
+    write_event_csv(path, [], ori_file=ori_path)
+
+    metadata, table = read_event_csv(path)  # must not raise
+
+    assert metadata['ori_file'] == str(ori_path)
+    assert isinstance(metadata['ori_file'], str)

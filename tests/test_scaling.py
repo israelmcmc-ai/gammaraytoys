@@ -22,9 +22,10 @@ import pytest
 from gammaraytoys import ToyTracker2D
 from gammaraytoys.sims import (ConstantScaling, Earth, EarthAlbedoSource,
                                ExtendedSource, FunctionScaling, InertialSimulator,
-                               IsotropicSource, MonoenergeticSpectrum, NearPointSource,
-                               PointSource, SimpleTraditionalReconstructor,
-                               SpacecraftHistory, TabulatedScaling)
+                               IsotropicSource, MonoenergeticSpectrum, NearFieldSource,
+                               NearPointSource, Photon, PointSource,
+                               SimpleTraditionalReconstructor, SpacecraftHistory,
+                               TabulatedScaling)
 from gammaraytoys.coordinates import Cartesian2D
 
 
@@ -170,6 +171,27 @@ def test_constant_scaling_rejects_nan():
         ConstantScaling(np.nan)
 
 
+def test_constant_scaling_scale_setter_validates_after_construction():
+    # Regression for fix commit 546d840: `scale` used to be a plain
+    # attribute, so `c.scale = -3.0` was accepted silently and only
+    # surfaced later, far from here, as `ValueError: lam < 0 or lam is
+    # NaN` raised by `numpy.random.poisson` deep inside a run -- exactly
+    # the failure `_validate_scale`'s own docstring says the module exists
+    # to prevent. `scale` is now a validating property, mirroring
+    # `Source.scaling`.
+    scaling = ConstantScaling(1.0)
+
+    with pytest.raises(ValueError):
+        scaling.scale = -3.0
+
+    with pytest.raises(ValueError):
+        scaling.scale = np.nan
+
+    # And the object is still usable afterwards, at its last-good value --
+    # a rejected assignment must not have corrupted it.
+    assert scaling(0 * u.s) == 1.0
+
+
 def test_function_scaling_rejects_negative_return():
     scaling = FunctionScaling(lambda t: -1.0)
     with pytest.raises(ValueError):
@@ -186,6 +208,38 @@ def test_function_scaling_rejects_non_numeric_return():
     scaling = FunctionScaling(lambda t: 'not a number')
     with pytest.raises(ValueError):
         scaling(0 * u.s)
+
+
+def test_function_scaling_returns_the_callables_value_and_passes_time_through():
+    # No prior test in this file ever observes a `FunctionScaling`'s return
+    # value: the three above all pass callables whose bad return raises
+    # before it is ever read. Pin both halves of the contract: the
+    # returned value really is the callable's own value (not, say, a
+    # hardcoded 1.0 after validation), and `time` really reaches the
+    # callable unchanged (not, say, always called with `0.0 * u.s`).
+    seen_times = []
+
+    def constant_2p5(t):
+        seen_times.append(t)
+        return 2.5
+
+    scaling = FunctionScaling(constant_2p5)
+    result = scaling(123.0 * u.s)
+
+    assert result == 2.5
+    assert type(result) is float
+    assert seen_times == [123.0 * u.s]
+
+    # A callable whose return value actually depends on `time`: if `time`
+    # were dropped in favour of some fixed argument, every call below
+    # would return the same (wrong) number regardless of `t`.
+    def linear_in_seconds(t):
+        return t.to_value(u.s) / 100.0
+
+    scaling2 = FunctionScaling(linear_in_seconds)
+    assert scaling2(300.0 * u.s) == pytest.approx(3.0)
+    assert scaling2(500.0 * u.s) == pytest.approx(5.0)
+    assert scaling2(300.0 * u.s) != scaling2(500.0 * u.s)
 
 
 # ===========================================================================
@@ -209,9 +263,6 @@ def test_default_scaling_returns_the_exact_float_one():
         value = scaling(t * u.s)
         assert value == 1.0
         assert type(value) is float
-
-    for mu in [0.0, 1.0, 1e-300, 1e300, 3.14159, 1234.5678, 5e-8, -0.0]:
-        assert mu * scaling(0 * u.s) == mu
 
 
 def _sources_with_default_scaling(detector):
@@ -244,6 +295,81 @@ def test_scaling_setter_rejects_a_non_scaling_value():
         source.scaling = 2.0
 
 
+class _BareSource(NearFieldSource):
+    """Same shape as `DemoNearFieldSource` in
+    `docs/examples/cosimita/00-source_normalization.ipynb`: a `Source`
+    subclass that never calls a base `__init__` at all (it sets its own
+    attributes directly and implements every abstract member itself), so
+    no constructor ever runs `self.scaling = ...` or otherwise sets
+    `self._scaling`."""
+
+    def __init__(self, position, rate, spectrum):
+        self._position = position
+        self._rate = rate
+        self._spectrum = spectrum
+
+    @property
+    def position(self):
+        return self._position
+
+    @property
+    def rate(self):
+        return self._rate
+
+    @property
+    def spectrum(self):
+        return self._spectrum
+
+    def simulated_rate(self, detector, pose=None):
+        return self.rate
+
+    def random_photon(self, detector, pose=None, earth=None):
+        return Photon(position=self.position,
+                      direction=np.random.uniform(0, 360) * u.deg,
+                      energy=self.spectrum.random_energy())
+
+
+def test_source_subclass_without_base_init_still_has_a_default_scaling():
+    # Regression for fix commit 546d840: before it, `.scaling`'s getter
+    # unconditionally read `self._scaling`, so a subclass shaped like
+    # `_BareSource` -- never running a base `__init__` -- raised
+    # `AttributeError: no attribute '_scaling'` the first time anything
+    # touched `.scaling`. `Source._scaling`'s class-level default (`None`)
+    # fixes this for any such third-party source, not just ones written
+    # after `scaling` existed.
+    source = _BareSource(position=Cartesian2D(0 * u.cm, 0 * u.cm),
+                         rate=2 * u.Hz, spectrum=SPECTRUM)
+
+    assert isinstance(source.scaling, ConstantScaling)
+    assert source.scaling(0 * u.s) == 1.0
+
+
+def test_source_subclass_without_base_init_runs_through_inertial_simulator():
+    # The same regression, end to end: `InertialSimulator.run_events`
+    # touches `source.scaling(...)` on every interval (Section 6), so this
+    # is exactly where the pre-fix AttributeError actually surfaced.
+    np.random.seed(20260906)
+
+    detector = _make_tracker()
+    earth = Earth(radius=6371.0 * u.km)
+    history = SpacecraftHistory(time=[0.0, 500.0] * u.s,
+                                orbit_radius=[7000.0, 7000.0] * u.km,
+                                orbit_angle=[0.0, 0.0] * u.deg,
+                                attitude=[0.0, 0.0] * u.deg,
+                                uptime=[500.0, 0.0] * u.s,
+                                earth=earth)
+
+    source = _BareSource(position=Cartesian2D(0 * u.cm, 0 * u.cm),
+                         rate=5 * u.Hz, spectrum=SPECTRUM)
+
+    simulator = InertialSimulator(detector=detector, sources=[source],
+                                  reconstructor=SimpleTraditionalReconstructor(),
+                                  spacecraft_history=history, earth=earth)
+
+    events = list(simulator.run_events(progress=False))
+    assert len(events) > 0
+
+
 # ===========================================================================
 # Part D -- InertialSimulator actually uses source.scaling, at mid_time
 # (TEST_BRIEF item 6; mutation targets (c) and (d))
@@ -254,7 +380,6 @@ ORBIT_RADIUS = 7000.0 * u.km
 # rho = arcsin(6371/7000) = 65.67 deg; with attitude = 90 deg (on-axis at
 # sky_angle = 90 deg -> nadir at orbit_angle + 180 = 180 deg), the
 # source-to-nadir separation is 90 deg > rho, so it is never occulted.
-_RHO_DEG = np.degrees(np.arcsin(EARTH_RADIUS.to_value(u.km) / ORBIT_RADIUS.to_value(u.km)))
 
 
 def _one_interval_history(livetime_s=1000.0):
@@ -320,6 +445,24 @@ def test_scaling_of_two_doubles_counts_relative_to_scaling_of_one():
     assert abs(n2 - 2 * MU) < 4 * sigma2
 
 
+def test_function_scaling_scales_a_real_inertial_simulator_run():
+    # The same guarantee as the test above, through a `FunctionScaling`
+    # instead of a `ConstantScaling` -- nothing else in this file runs a
+    # real `InertialSimulator` with one.
+    np.random.seed(20260905)
+
+    MU = 600.0
+    detector = _make_tracker()
+    history, earth = _one_interval_history()
+
+    scaling = FunctionScaling(lambda t: 2.0)
+    events = _run_point_source(MU, scaling, detector, history, earth)
+
+    expected = 2 * MU
+    sigma = np.sqrt(expected)
+    assert abs(len(events) - expected) < 4 * sigma
+
+
 def test_scaling_evaluated_at_interval_midpoint_not_start_time():
     # Mutation (d): applying the scaling at `start_time` instead of
     # `mid_time`. Built so the two give provably different answers: the
@@ -330,8 +473,8 @@ def test_scaling_evaluated_at_interval_midpoint_not_start_time():
     #
     # sigma(MU) = sqrt(MU) for the correct (mid_time) expectation; the
     # start_time mutant's expectation is 3x smaller (MU vs 3*MU), which at
-    # MU=600 is off by 1200 -- about 34 sigma of sqrt(3*600) -- so this is
-    # not a marginal test.
+    # MU=600 is off by 1200 -- about 28.3 sigma of sqrt(3*600) = 42.43 --
+    # so this is not a marginal test.
     np.random.seed(20260904)
 
     MU = 600.0
