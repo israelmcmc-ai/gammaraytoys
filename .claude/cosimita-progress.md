@@ -40,8 +40,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
-| 5 | `EarthAlbedoSource` | `claude/cosimita-pr5-earth-albedo` | **Open as PR #19**, awaiting maintainer review. 375 tests |
-| 6 | Time-dependent scaling + event CSV I/O | — | Not started |
+| 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
+| 6 | Time-dependent scaling + event CSV I/O | `claude/cosimita-pr6-scaling-and-event-io` | Implementer running |
 | 7 | YAML configuration | — | Not started |
 
 Side PRs, outside the seven:
@@ -169,6 +169,12 @@ Carried forward until answered; they shape later PRs.
   overrides the inline backend, so `--execute --inplace` silently strips every figure
   from the committed `.ipynb` while exiting 0. The CI job sets Agg deliberately, which
   is fine there because it discards output via `--stdout`.
+
+## Notebooks stay in CI
+
+The maintainer measures the whole `notebooks` job at ~120 s on their machine, about
+half what this container reports, and has decided the numbered notebooks stay in CI.
+Do not propose moving them to `slow/` on wall-time grounds.
 
 ## Long-running notebooks live outside CI
 
@@ -307,6 +313,17 @@ backend and silently strips every figure while still exiting 0.
   count from the wrong planet. The default `Earth()` is astropy's 6378.1 km while this
   project uses 6371 km, so the plain `EarthAlbedoSource(E, spectrum)` form is the
   mismatching one. Now checked in `InertialSimulator._validate_sources`.
+- **Fix a wrong base-class docstring in the base class, not with a subclass override.**
+  PR 5 documented `EarthAlbedoSource`'s pose requirement by overriding
+  `simulated_rate` purely to carry a corrected docstring. The maintainer asked for the
+  inherited one to be fixed instead, and was right for a reason worth remembering: the
+  base docstring was not merely incomplete for the subclass, it was actively false --
+  and it carried a separate stale claim ("every source in this package has a
+  pose-independent rate") that an override would have left sitting there for every
+  future reader.
+- **`_expand_axes_limits` leaves 8% headroom** (`_PLOT_AXES_MARGIN`). It used to expand
+  to exactly the radius requested, so a sky-circle star sat on the boundary half
+  clipped and an arc drawn at that radius traced the frame itself.
 - **Compare a new source's speed against the sibling that does the same work.** PR 4's
   implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
   believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
