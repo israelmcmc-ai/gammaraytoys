@@ -41,7 +41,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
-| 6 | Time-dependent scaling + event CSV I/O | `claude/cosimita-pr6-scaling-and-event-io` | Implementer running |
+| 6 | Time-dependent scaling + event CSV I/O | `claude/cosimita-pr6-scaling-and-event-io` | **Open as PR #20**, awaiting maintainer review. 438 tests |
 | 7 | YAML configuration | — | Not started |
 
 Side PRs, outside the seven:
@@ -324,6 +324,21 @@ backend and silently strips every figure while still exiting 0.
 - **`_expand_axes_limits` leaves 8% headroom** (`_PLOT_AXES_MARGIN`). It used to expand
   to exactly the radius requested, so a sky-circle star sat on the boundary half
   clipped and an arc drawn at that radius traced the frame itself.
+- **A `true_*` column must mean *this event*, never a property of its source.** PR 6
+  wrote `ExtendedSource`'s distribution centre into `true_sky_angle_deg`: a constant
+  40 deg while the real per-photon angles spanned 181 deg, mean error 21 deg. A NaN
+  would have been honest; a plausible constant was not. If per-event truth is not
+  recoverable, write nothing rather than something that looks right.
+- **A test fixture that removes an ambiguity often removes the test.** PR 6's event
+  helper timestamped every photon at `interval.mid_time` so the drawing and lookup
+  attitudes were unambiguously the same interval -- which is exactly why the attitude
+  search was never exercised, and why three mutations in it passed the whole suite,
+  the worst corrupting 43% of rows by up to 54 deg. Fixtures must reproduce what the
+  code under test really produces; `run_events` draws timestamps uniform over the span.
+- **Give abstract bases a class-level default for any new attribute.** PR 6's `scaling`
+  was set only in each concrete `__init__`, so a third-party subclass -- including the
+  demo source in the shipped notebook 00 -- crashed inside `run_events` with
+  `AttributeError`. One class-level default keeps a new feature backward compatible.
 - **Compare a new source's speed against the sibling that does the same work.** PR 4's
   implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
   believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
