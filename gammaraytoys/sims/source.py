@@ -91,6 +91,15 @@ class Source(ABC):
       position near the detector). Exposes that rate through `rate`.
     """
 
+    # Class-level default so a Source subclass written before `scaling`
+    # existed -- or any third-party one that never calls a base `__init__`
+    # -- keeps working. Without it the `scaling` getter raises
+    # `AttributeError: no attribute '_scaling'` from inside `run_events`,
+    # which is exactly what the DemoNearFieldSource in
+    # `docs/examples/cosimita/00-source_normalization.ipynb` does.
+    _scaling = None
+
+
     @property
     @abstractmethod
     def normalization(self):
@@ -153,6 +162,14 @@ class Source(ABC):
             On assignment, if the new value is neither `None` nor a
             `SourceScaling`.
         """
+
+        # `_scaling` defaults to `None` at class level, so a subclass that
+        # never runs a base `__init__` -- the demo source in notebook 00,
+        # for one -- still gets "no scaling" rather than an AttributeError
+        # from inside a run.
+        if self._scaling is None:
+            return ConstantScaling(1.0)
+
         return self._scaling
 
     @scaling.setter

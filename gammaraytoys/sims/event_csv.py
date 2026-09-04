@@ -72,9 +72,23 @@ def _source_label(source, source_names):
     """
 
     if source_names is not None and source in source_names:
-        return source_names[source]
+        label = str(source_names[source])
+    else:
+        label = type(source).__name__
 
-    return type(source).__name__
+    # `read_event_csv` parses with `comment = '#'`, which truncates an
+    # unquoted field at the first '#' and silently NaNs every column after
+    # it -- while the '#'-bearing name survives intact in the header's
+    # `nsim`, leaving the file inconsistent with itself. Refuse to write
+    # such a file rather than write one that cannot be read back.
+    if '#' in label:
+        raise ValueError(
+            f"Source label {label!r} contains '#', which cannot appear in an "
+            "event file: the reader treats it as the start of a comment and "
+            "would silently drop the rest of the row. Rename the source in "
+            "`source_names`.")
+
+    return label
 
 
 def _wrap180(angle_deg):
@@ -398,19 +412,26 @@ def write_event_csv(filename, events, *, triggered_only = False,
 
     metadata = {
         'gammaraytoys_version': __version__,
-        'ori_file': ori_file,
+        # `str(...)` so a path-like `ori_file` -- natural to pass, since
+        # `filename` itself is documented as path-like -- does not reach the
+        # dumper as a `Path`. See the `safe_dump` note below.
+        'ori_file': str(ori_file) if ori_file is not None else None,
         # `float(...)`, not the bare `Quantity.to_value` result: that can be
-        # a numpy scalar, which `yaml.dump` (default Dumper) serializes with
-        # a Python-specific `!!python/object/apply:...` tag that
-        # `yaml.safe_load` -- used by `read_event_csv` -- refuses to
-        # construct. A plain Python float dumps as an ordinary YAML scalar.
+        # a numpy scalar, which serializes with a Python-specific
+        # `!!python/object/apply:...` tag that `yaml.safe_load` -- used by
+        # `read_event_csv` -- refuses to construct. A plain Python float
+        # dumps as an ordinary YAML scalar.
         'total_livetime_s': (float(total_livetime.to_value(u.s))
                              if total_livetime is not None else None),
         'nsim': nsim,
         'triggered_only': bool(triggered_only),
     }
 
-    header = yaml.dump(metadata, sort_keys = False, default_flow_style = None)
+    # `safe_dump`, not `dump`, so the writer and the reader agree on what is
+    # representable: anything `safe_load` could not reconstruct raises here,
+    # at write time and naming the type, instead of producing a file that
+    # only fails when somebody later tries to read it.
+    header = yaml.safe_dump(metadata, sort_keys = False, default_flow_style = None)
     header = '\n'.join(f"# {line}" for line in header.splitlines())
 
     with open(filename, 'w') as f:

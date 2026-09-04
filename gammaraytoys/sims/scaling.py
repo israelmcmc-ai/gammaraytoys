@@ -112,7 +112,27 @@ class ConstantScaling(SourceScaling):
             If `scale` is not finite or is negative.
         """
 
-        self.scale = _validate_scale(float(scale), "ConstantScaling's scale")
+        self.scale = scale
+
+    @property
+    def scale(self):
+        """
+        float: the constant scale factor.
+
+        Validated on assignment, not only at construction: an unchecked
+        `constant.scale = -3.0` would otherwise surface far away, as
+        `ValueError: lam < 0 or lam is NaN` from `numpy.random.poisson`
+        deep inside a run.
+
+        Returns
+        -------
+        float
+        """
+        return self._scale
+
+    @scale.setter
+    def scale(self, scale):
+        self._scale = _validate_scale(float(scale), "ConstantScaling's scale")
 
     def __call__(self, time):
         """
