@@ -40,7 +40,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
-| 5 | `EarthAlbedoSource` | `claude/cosimita-pr5-earth-albedo` | Implementer running |
+| 5 | `EarthAlbedoSource` | `claude/cosimita-pr5-earth-albedo` | **Open as PR #19**, awaiting maintainer review. 375 tests |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
 | 7 | YAML configuration | — | Not started |
 
@@ -294,6 +294,19 @@ backend and silently strips every figure while still exiting 0.
   occultation deletable outright with the suite green. When a fixture switches
   something off to isolate something else, check that the thing switched off is still
   tested somewhere.
+- **A source that caches per-pose geometry needs a test that reuses ONE source across
+  poses.** PR 5's albedo caches its geometry on the orbital radius. Dropping
+  `orbit_radius` from the cache key -- so it freezes at whatever radius it first saw --
+  passed all 367 tests while inflating an elliptical-orbit expected count by 53-57%.
+  Every test that varied altitude built a *fresh* source inside the loop. Interleave
+  the poses (lo, hi, lo, hi): a cache that updates but only ever forward survives a
+  monotone sweep.
+- **A source carrying its own `Earth` must be validated against the simulator's at
+  construction.** `EarthAlbedoSource` re-checked per photon, which is too late: a run
+  whose Poisson draw comes up empty finishes silently having computed every expected
+  count from the wrong planet. The default `Earth()` is astropy's 6378.1 km while this
+  project uses 6371 km, so the plain `EarthAlbedoSource(E, spectrum)` form is the
+  mismatching one. Now checked in `InertialSimulator._validate_sources`.
 - **Compare a new source's speed against the sibling that does the same work.** PR 4's
   implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
   believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
