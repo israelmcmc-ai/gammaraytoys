@@ -351,3 +351,63 @@ def test_scaling_evaluated_at_interval_midpoint_not_start_time():
     expected = 3 * MU
     sigma = np.sqrt(expected)
     assert abs(len(events) - expected) < 4 * sigma
+
+
+def test_expected_counts_also_uses_scaling_at_interval_midpoint():
+    # `InertialSimulator` evaluates `source.scaling(...)` at TWO call
+    # sites: once inside `run_events` (the actual Poisson draw, pinned by
+    # the test above) and once inside `_expected_counts` (the tqdm
+    # progress-bar total -- and, per `tests/test_earth_albedo.py`'s
+    # `test_expected_counts_matches_independent_total_on_an_eccentric_orbit`
+    # -pattern tests, the value this suite already treats as the
+    # authoritative expected photon count for a run). With a merely
+    # constant scaling the two sites cannot be told apart; this needs a
+    # genuinely time-varying one, with a distinct value change strictly
+    # *inside* each interval, so `scaling(start_time) != scaling(mid_time)`
+    # for every interval in the run:
+    #
+    #   interval 0 = [0, 1000) s, mid_time = 500 s
+    #   interval 1 = [1000, 2000) s, mid_time = 1500 s
+    #   TabulatedScaling breakpoints at t = 250 s and t = 1250 s (strictly
+    #   inside interval 0 and interval 1 respectively):
+    #     interval 0: scaling(start=0)    = 1.0, scaling(mid=500)  = 3.0
+    #     interval 1: scaling(start=1000) = 3.0, scaling(mid=1500) = 5.0
+    detector = _make_tracker()
+    earth = Earth(radius=EARTH_RADIUS)
+
+    history = SpacecraftHistory(time=[0.0, 1000.0, 2000.0] * u.s,
+                                orbit_radius=[ORBIT_RADIUS.to_value(u.km)] * 3 * u.km,
+                                orbit_angle=[0.0, 0.0, 0.0] * u.deg,
+                                attitude=[90.0, 90.0, 90.0] * u.deg,
+                                uptime=[1000.0, 1000.0, 0.0] * u.s,
+                                earth=earth)
+
+    scaling = TabulatedScaling(time=[0.0, 250.0, 1250.0] * u.s, scale=[1.0, 3.0, 5.0])
+
+    flux = 2.0 / u.cm / u.s
+    source = PointSource(sky_angle=90 * u.deg, spectrum=SPECTRUM, flux=flux, scaling=scaling)
+
+    simulator = InertialSimulator(detector=detector, sources=[source],
+                                  reconstructor=SimpleTraditionalReconstructor(),
+                                  spacecraft_history=history, earth=earth)
+
+    actual = simulator._expected_counts()
+
+    # Section 6: mu = simulated_rate(detector, pose) * livetime *
+    # scaling(mid_time), summed over intervals. simulated_rate = flux *
+    # throwing_plane_size (Section 5.2) is pose-independent for a
+    # PointSource, so this is a plain per-interval sum -- derived here from
+    # the plan's formula, not from calling `_expected_counts` itself.
+    rate_hz = (flux * detector.throwing_plane_size).to_value(u.Hz)
+    expected = sum(rate_hz * interval.livetime.to_value(u.s) * scaling(interval.mid_time)
+                  for interval in history)
+
+    assert actual == pytest.approx(expected, rel=1e-12)
+
+    # Spelled out: using start_time instead would give a different, smaller
+    # total (4000 * rate_hz vs. 8000 * rate_hz), so this is not a
+    # coincidental match.
+    wrong_using_start_time = sum(
+        rate_hz * interval.livetime.to_value(u.s) * scaling(interval.start_time)
+        for interval in history)
+    assert expected != pytest.approx(wrong_using_start_time, rel=1e-6)
