@@ -25,6 +25,12 @@ _PLOT_LENGTH_UNIT = u.cm
 _SKY_MARKER_RADIUS_FACTOR = 1.08
 
 
+# Fractional headroom `_expand_axes_limits` leaves around whatever it is
+# asked to make room for, so markers and arcs are not drawn flush against
+# the edge of the frame.
+_PLOT_AXES_MARGIN = 1.08
+
+
 def _expand_axes_limits(ax, center, radius, length_unit = _PLOT_LENGTH_UNIT):
     """
     Grow `ax`'s x/y limits, if necessary, to contain a square bounding box
@@ -52,7 +58,12 @@ def _expand_axes_limits(ax, center, radius, length_unit = _PLOT_LENGTH_UNIT):
 
     x_center = center.x.to_value(length_unit)
     y_center = center.y.to_value(length_unit)
-    r = radius.to_value(length_unit)
+
+    # A little headroom, so whatever is being made room for does not end up
+    # flush against the frame. Without it a sky-circle marker sits exactly on
+    # the boundary and is half clipped, and an arc drawn at the expansion
+    # radius traces the frame itself rather than reading as a separate thing.
+    r = radius.to_value(length_unit) * _PLOT_AXES_MARGIN
 
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
@@ -316,15 +327,23 @@ class Source(ABC):
             `throwing_plane_size` sets the overall scale.
         pose : `SpacecraftInterval` or None
             Spacecraft pose to evaluate the source in. `None` means pure
-            detector-frame mode. Every source in this package has a
-            pose-independent rate today -- the pose is threaded through for
-            the (later) Earth albedo, whose apparent flux depends on the
-            orbital radius.
+            detector-frame mode. Most sources have a pose-independent rate
+            and ignore it; `EarthAlbedoSource` does not, and **requires** a
+            pose, because its flux depends on how much sky the Earth fills
+            and so on `pose.orbit_radius`.
 
         Returns
         -------
         `astropy.units.Quantity`
             Rate in `1/s`, or `None` if the source has no normalization set.
+            `EarthAlbedoSource` never returns `None`: its emissivity is
+            validated as strictly positive at construction.
+
+        Raises
+        ------
+        ValueError
+            By `EarthAlbedoSource` only, if `pose` is `None` or its
+            `orbit_radius` does not exceed the Earth's radius.
         """
         pass
 
@@ -399,12 +418,22 @@ class FarFieldSource(Source):
             `2a`, where `a` is the surrounding-circle radius.
         pose : `SpacecraftInterval` or None
             Spacecraft pose, forwarded to `flux`. `None` means pure
-            detector-frame mode.
+            detector-frame mode for every far-field source except
+            `EarthAlbedoSource`, whose `flux` **requires** a pose because it
+            depends on `pose.orbit_radius`.
 
         Returns
         -------
         `astropy.units.Quantity`
             Rate in `1/s`, or `None` if the source has no normalization set.
+            `EarthAlbedoSource` never returns `None`: its emissivity is
+            validated as strictly positive at construction.
+
+        Raises
+        ------
+        ValueError
+            By `EarthAlbedoSource` only, if `pose` is `None` or its
+            `orbit_radius` does not exceed the Earth's radius.
         """
         flux = self.flux(pose)
 
@@ -2222,41 +2251,6 @@ class EarthAlbedoSource(FarFieldSource):
         self._update_geometry(pose.orbit_radius)
 
         return (self.emissivity * self._flux_factor).to(1/u.cm/u.s)
-
-    def simulated_rate(self, detector, pose = None):
-        """
-        Rate of photons launched at the detector, in `1/s`.
-
-        `flux(pose) * detector.throwing_plane_size`, exactly as for any other
-        far-field source -- this override exists only because the inherited
-        docstring is wrong for this class on both counts: `pose` is required
-        rather than optional, and the return is never `None`.
-
-        Parameters
-        ----------
-        detector : `ToyTracker2D`
-            The detector photons are thrown at; supplies the throwing-plane
-            size `2a`.
-        pose : `SpacecraftInterval`
-            Spacecraft pose. **Required**, unlike every other far-field
-            source: this source's flux depends on how much sky the Earth
-            fills, and so on `pose.orbit_radius`.
-
-        Returns
-        -------
-        `astropy.units.Quantity`
-            The rate in `1/s`. Never `None`: the emissivity is validated as
-            strictly positive at construction, so this source cannot be
-            unnormalized.
-
-        Raises
-        ------
-        ValueError
-            If `pose` is `None`, or its `orbit_radius` does not exceed the
-            Earth's radius.
-        """
-
-        return super().simulated_rate(detector, pose)
 
     @property
     def normalization(self):

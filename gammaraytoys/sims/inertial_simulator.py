@@ -150,8 +150,8 @@ class InertialSimulator(SimulatorBase):
         Check every source is usable in an inertial run, and raise naming the
         offender if not.
 
-        Two things can go wrong, and both are much cheaper to catch here than
-        halfway through a run:
+        Three things can go wrong, and all of them are much cheaper to catch
+        here than halfway through a run:
 
         - a source with no flux or rate set, whose `simulated_rate()` is
           `None` and would otherwise blow up as a `TypeError` inside the
