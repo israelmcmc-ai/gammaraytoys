@@ -39,8 +39,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
 | 2 | `Earth`, `SpacecraftHistory`, orbits | merged | **Merged** (PR #14) |
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
-| 4 | `NearPointSource`, `ExtendedSource` | `claude/cosimita-pr4-near-and-extended-sources` | **Open as PR #17**, awaiting maintainer review. 345 tests |
-| 5 | `EarthAlbedoSource` | — | Not started |
+| 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
+| 5 | `EarthAlbedoSource` | `claude/cosimita-pr5-earth-albedo` | Implementer running |
 | 6 | Time-dependent scaling + event CSV I/O | — | Not started |
 | 7 | YAML configuration | — | Not started |
 
@@ -49,6 +49,7 @@ Side PRs, outside the seven:
 | PR | Scope | State |
 |---|---|---|
 | #16 | `SimpleTraditionalReconstructor` trigger guard (`and np.any(hits.layer > 0)`) | **Merged** |
+| #18 | `PointSource` chirality coverage (tests only) | **Merged** |
 
 Branch naming: `claude/cosimita-prN-<topic>`, always cut from `main`.
 
@@ -169,6 +170,16 @@ Carried forward until answered; they shape later PRs.
   from the committed `.ipynb` while exiting 0. The CI job sets Agg deliberately, which
   is fine there because it discards output via `--stdout`.
 
+## Long-running notebooks live outside CI
+
+`docs/examples/cosimita/slow/` holds notebooks that run real simulations to a few
+hundred triggers per panel -- minutes each. The `notebooks` CI job globs
+`docs/examples/cosimita/*.ipynb`, which does **not** recurse, so they are skipped by
+construction; a README there and a comment on the job say so explicitly. Keep the
+numbered notebooks fast enough to gate every push and put anything slower in `slow/`.
+**Never re-execute a notebook with `MPLBACKEND=Agg`** -- it overrides the inline
+backend and silently strips every figure while still exiting 0.
+
 ## Landed in PR 4, beyond the plan
 
 - **`NearFieldSource.plot` now expands the axes limits.** PR 1 wrote it without the
@@ -182,12 +193,6 @@ Carried forward until answered; they shape later PRs.
   that. PRs 5-7 adding any other sampled distribution should validate the same way.
 - **Both new sources emit `direction` in degrees.** `Particle` preserves whatever unit
   it is handed, so a radian direction is visible downstream in `EventList.write`.
-
-## Known issue, pre-existing, awaiting its own PR
-
-- **`PointSource`'s chirality flip can be deleted with the whole suite green.** Found
-  while mutation-testing PR 4; the code is PR 1-era, so it was left out of scope there.
-  `NearPointSource`'s equivalent is covered.
 
 ## Known issues — all three now resolved
 
