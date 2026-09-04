@@ -44,7 +44,7 @@ from scipy import stats
 from scipy.integrate import cumulative_trapezoid, quad
 
 from gammaraytoys import ToyTracker2D
-from gammaraytoys.coordinates import offaxis_to_sky_angle
+from gammaraytoys.coordinates import offaxis_to_sky_angle, sky_angle_to_offaxis
 from gammaraytoys.sims import (Earth, EarthAlbedoSource, InertialSimulator,
                                MonoenergeticSpectrum, PointSource,
                                SimpleTraditionalReconstructor, SpacecraftHistory,
@@ -181,17 +181,21 @@ def test_lambertian_rate_matches_closed_form_across_altitudes():
 
         rates_hz.append(actual.to_value(u.Hz))
 
-    # Item 15: a source that ignored `pose.orbit_radius` (e.g. used a fixed
-    # altitude) would give the same rate at every altitude above. Instead,
-    # the rate must be strictly decreasing with altitude, and the 100 km /
-    # 100 000 km ratio must match the closed form's OWN ratio exactly (not
-    # merely "be different") -- ruling out a source that depends on `r`
-    # through some other, wrong channel that happens to still vary.
-    assert np.all(np.diff(rates_hz) < 0)
-
-    expected_ratio = (np.arcsin(RE / (RE + 100.0)) / np.arcsin(RE / (RE + 100000.0)))
-    assert expected_ratio == pytest.approx(23.278, abs=0.01)  # TEST_NOTES.md's two rows
-    assert rates_hz[0] / rates_hz[-1] == pytest.approx(expected_ratio, rel=1e-9)
+    # NOTE on item 15 (simulated_rate genuinely depends on orbit_radius):
+    # asserting that `rates_hz` varies across the loop above is tautological
+    # here and proves nothing extra -- each `rates_hz[i]` was ALREADY pinned
+    # to its own `expected_hz` (built from the SAME `RE + altitude_km`) at
+    # rel=1e-9 just above, and every `expected_hz` in the list is trivially
+    # different by construction, so "the rates differ" follows from the
+    # preceding asserts with no additional test power: a source that ignored
+    # `pose.orbit_radius` would already have failed the per-altitude
+    # `expected_hz` comparison above, at the FIRST altitude that isn't its
+    # (wrong) fixed one. The test that actually earns item 15 is
+    # `test_earth_albedo_rate_cache_invalidates_when_orbit_radius_changes`
+    # below: it reuses ONE source object across interleaved radii, which is
+    # the only way to distinguish "uses pose.orbit_radius" from "cached the
+    # first orbit_radius it ever saw and never updated" -- a fresh source
+    # per altitude, as built in this loop, cannot tell those apart.
 
 
 # --- 2. isotropic rate matches the independent SKY-ANGLE integral ---------
@@ -252,6 +256,202 @@ def test_isotropic_rate_matches_independent_sky_angle_integral():
         assert actual.to_value(u.Hz) / lambertian_hz == pytest.approx(expected_ratio, abs=2e-4)
 
 
+# --- GAP 1: the geometry cache must invalidate on every orbit_radius, ----
+# --- not just the first one seen ------------------------------------------
+#
+# Section 5.6 / CONTRACT.md: "constant for a circular orbit and changes
+# only per interval otherwise". Every test above that checks a rate builds
+# a FRESH `EarthAlbedoSource` per altitude, so none of them can tell "reads
+# pose.orbit_radius correctly" apart from "cached whatever radius it saw on
+# its first call and never updated" -- a source that freezes its geometry
+# at construction-time's first radius would pass every one of them. These
+# two tests reuse ONE source object across multiple, interleaved radii.
+
+def test_earth_albedo_rate_cache_invalidates_when_orbit_radius_changes():
+    # Alternates between a low (200 km) and a high (20 000 km) altitude,
+    # several times each way, on a single long-lived source per law, and
+    # checks `simulated_rate` against the closed/independent form for
+    # WHICHEVER radius was just visited. A cache keyed on `orbit_radius`
+    # only somewhat -- e.g. one that updates going up but not coming back
+    # down -- would still fail the low-altitude checks after the first
+    # high-altitude visit; interleaving both directions repeatedly is what
+    # catches that, rather than a single low-then-high (or high-then-low)
+    # pass.
+    detector = _make_tracker()
+    earth = _make_earth()
+    a_cm = detector.surrounding_circle_radius.to_value(u.cm)
+    RE = EARTH_RADIUS.to_value(u.km)
+
+    emissivity = 2.3 / u.cm / u.s
+    E = emissivity.to_value(1 / u.cm / u.s)
+
+    r_lo_km = RE + 200.0
+    r_hi_km = RE + 20000.0
+    pose_lo = _pose(r_lo_km * u.km)
+    pose_hi = _pose(r_hi_km * u.km)
+
+    def expected_lambertian_hz(r_km):
+        return 2 * a_cm * E * np.arcsin(RE / r_km)
+
+    def expected_isotropic_hz(r_km):
+        rho = np.arcsin(RE / r_km)
+
+        def cos_theta(lam, r_km=r_km):
+            sin_theta = (r_km / RE) * np.sin(lam)
+            return np.sqrt(np.clip(1.0 - sin_theta**2, 0.0, None))
+
+        integral, _ = quad(lambda lam: 1.0 / cos_theta(lam), -rho, rho, limit=200)
+        return (2 * a_cm * E / np.pi) * integral
+
+    expected_fns = {'lambertian': expected_lambertian_hz, 'isotropic': expected_isotropic_hz}
+
+    for law, expected_fn in expected_fns.items():
+        source = EarthAlbedoSource(emissivity=emissivity, spectrum=SPECTRUM,
+                                   law=law, earth=earth)
+
+        # lo, hi, lo, hi, lo, hi -- three full round trips.
+        sequence = [(pose_lo, r_lo_km), (pose_hi, r_hi_km)] * 3
+
+        for step, (pose, r_km) in enumerate(sequence):
+            actual_hz = source.simulated_rate(detector, pose).to_value(u.Hz)
+            expected_hz = expected_fn(r_km)
+            assert actual_hz == pytest.approx(expected_hz, rel=1e-6), (
+                f"{law}, step {step}: after visiting r = {r_km} km, "
+                f"simulated_rate returned {actual_hz} Hz, expected "
+                f"{expected_hz} Hz -- looks like a stale geometry cache")
+
+
+def test_earth_albedo_sampling_cache_invalidates_when_orbit_radius_changes():
+    # The companion check on the SAMPLING side of the same cache
+    # (`_update_geometry` also rebuilds rho, the beta grid and the beta CDF,
+    # not just the rate's `flux_factor`): after switching to a new radius,
+    # every drawn sky angle must respect the NEW rho, not a stale one
+    # inherited from whichever radius the cache last (really) updated to.
+    # Same interleaved lo/hi/lo/hi/lo/hi pattern as the rate test above.
+    detector = _make_tracker()
+    earth = _make_earth()
+    RE = EARTH_RADIUS.to_value(u.km)
+
+    r_lo_km = RE + 200.0
+    r_hi_km = RE + 20000.0
+    rho_lo_deg = np.degrees(np.arcsin(RE / r_lo_km))
+    rho_hi_deg = np.degrees(np.arcsin(RE / r_hi_km))
+    # Sanity: the two rho values must be comfortably different, or a stale
+    # cache could pass this test by accident.
+    assert rho_hi_deg < 0.5 * rho_lo_deg
+
+    pose_lo = _pose(r_lo_km * u.km)
+    pose_hi = _pose(r_hi_km * u.km)
+
+    n_per_step = 150
+
+    for law in ('lambertian', 'isotropic'):
+        source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM,
+                                   law=law, earth=earth)
+
+        sequence = [(pose_lo, rho_lo_deg), (pose_hi, rho_hi_deg)] * 3
+
+        for step, (pose, rho_deg) in enumerate(sequence):
+            offsets_deg = _drawn_sky_offsets_deg(source, detector, pose, earth, n_per_step)
+            max_abs = np.abs(offsets_deg).max()
+            assert max_abs <= rho_deg + 1e-6, (
+                f"{law}, step {step}: max |offset| = {max_abs} deg exceeds "
+                f"rho = {rho_deg} deg for this pose -- looks like a stale "
+                "geometry cache")
+
+            # And, for the high-altitude steps specifically, a cache stuck
+            # on the low-altitude rho (much wider) would still pass the
+            # bound above vacuously if it happened to sample only small
+            # angles -- so also require the draws to actually use most of
+            # the CURRENT rho's range, not just a stale wider one's centre.
+            if rho_deg == rho_hi_deg:
+                assert max_abs > 0.5 * rho_hi_deg, (
+                    f"{law}, step {step}: draws stayed within "
+                    f"{max_abs} deg, well inside the current rho = "
+                    f"{rho_hi_deg} deg -- looks like a stale, wider cached rho")
+
+
+def test_earth_albedo_expected_count_matches_independent_per_interval_sum_on_an_elliptical_orbit():
+    # The second prong of GAP 1: a real elliptical orbit (a = 14371 km,
+    # e = 0.35, matching the review's own measurement), whose orbital radius
+    # varies continuously interval to interval -- 200 intervals, radius
+    # ranging over roughly 9341-19401 km for this orbit. `InertialSimulator`
+    # queries the SAME long-lived `EarthAlbedoSource` object once per
+    # interval via `simulated_rate(detector, pose)`
+    # (`InertialSimulator._expected_counts`, and identically inside
+    # `run_events`'s own Poisson-mean computation) -- exactly the "one
+    # source, many different radii" situation a frozen-at-first-radius cache
+    # cannot survive. The comparison total is summed here per interval by
+    # hand, from the SAME closed/independent forms used elsewhere in this
+    # file, never by calling `source.simulated_rate`.
+    #
+    # `_expected_counts()` is used rather than a full stochastic
+    # `run_events()` because it is deterministic (no Poisson noise to
+    # budget sigma for) and exercises exactly the code path
+    # (`simulated_rate(detector, pose)` once per interval, on one shared
+    # source) the review's own reproduction measured: a stale cache showed
+    # up there as "the reused source reports a total expected count +52.8%
+    # (lambertian) / +56.8% (isotropic) above the truth" -- the same
+    # quantity, and the same rough magnitude of error, this test's `rel`
+    # tolerance is nowhere near wide enough to hide.
+    earth = _make_earth()
+    detector = _make_tracker()
+    a_cm = detector.surrounding_circle_radius.to_value(u.cm)
+    RE = EARTH_RADIUS.to_value(u.km)
+
+    semi_major_axis = 14371.0 * u.km
+    eccentricity = 0.35
+    period = _orbital_period(semi_major_axis)
+    n_intervals = 200
+
+    history = SpacecraftHistory.from_elliptical_orbit(
+        semi_major_axis=semi_major_axis, eccentricity=eccentricity, earth=earth,
+        observation_strategy=ZenithPointing(), time_step=period / n_intervals,
+        duration=period, livetime_fraction=1.0)
+
+    radii_km = [interval.orbit_radius.to_value(u.km) for interval in history]
+    # Sanity: the orbit really does visit a wide range of radii, or this
+    # test would not distinguish a correct cache from a frozen one.
+    assert max(radii_km) > 1.5 * min(radii_km)
+
+    emissivity = 1.7 / u.cm / u.s
+    E = emissivity.to_value(1 / u.cm / u.s)
+
+    for law in ('lambertian', 'isotropic'):
+        source = EarthAlbedoSource(emissivity=emissivity, spectrum=SPECTRUM,
+                                   law=law, earth=earth)
+
+        independent_total = 0.0
+        for interval in history:
+            r_km = interval.orbit_radius.to_value(u.km)
+            livetime_s = interval.livetime.to_value(u.s)
+
+            if law == 'lambertian':
+                rate_hz = 2 * a_cm * E * np.arcsin(RE / r_km)
+            else:
+                rho = np.arcsin(RE / r_km)
+
+                def cos_theta(lam, r_km=r_km):
+                    sin_theta = (r_km / RE) * np.sin(lam)
+                    return np.sqrt(np.clip(1.0 - sin_theta**2, 0.0, None))
+
+                integral, _ = quad(lambda lam: 1.0 / cos_theta(lam), -rho, rho, limit=200)
+                rate_hz = (2 * a_cm * E / np.pi) * integral
+
+            independent_total += rate_hz * livetime_s
+
+        simulator = InertialSimulator(detector=detector, sources=[source],
+                                      reconstructor=SimpleTraditionalReconstructor(),
+                                      spacecraft_history=history, earth=earth)
+
+        actual_total = simulator._expected_counts()
+
+        assert actual_total == pytest.approx(independent_total, rel=1e-4), (
+            f"{law}: InertialSimulator._expected_counts() = {actual_total} "
+            f"disagrees with the independently per-interval-summed total "
+            f"{independent_total} on an elliptical orbit")
+
+
 # --- 3. sampled sky angles all fall within rho of nadir -------------------
 
 def test_sampled_sky_angles_all_fall_within_rho_of_nadir():
@@ -276,6 +476,72 @@ def test_sampled_sky_angles_all_fall_within_rho_of_nadir():
         assert np.all(np.abs(offsets_deg) <= rho_deg + 1e-6), (
             f"{law}: a sampled sky angle fell outside rho = {rho_deg} deg of nadir "
             f"(max |offset| = {np.abs(offsets_deg).max()} deg)")
+
+
+# --- TQ3: a check made directly on photon.direction, not through the -----
+# --- inverse of the transform random_photon just applied -----------------
+
+def test_random_photon_direction_matches_a_hand_computed_value_at_a_known_pose():
+    # `_drawn_sky_offsets_deg` (used by most tests above) recovers the drawn
+    # sky angle with `offaxis_to_sky_angle(offaxis, pose.attitude)`, the
+    # EXACT inverse of the `Nu = A - lambda` transform `random_photon` just
+    # applied via `sky_angle_to_offaxis`. Composing a transform with its own
+    # inverse cancels any error in how `attitude` (or `orbit_angle`) is
+    # used identically on both sides -- the PR 4 lesson recorded in
+    # `.claude/cosimita-progress.md` ("a test helper must not invert the
+    # transform under test"). This test instead reads `photon.direction`
+    # directly and compares it to a value computed by hand from Section
+    # 3.4's stated conventions ("a source at off-axis angle Nu lies along
+    # (sin Nu, cos Nu) while the photon it emits flies along 270 deg - Nu"),
+    # composed with `Nu = A - lambda` and `lambda = nadir = orbit_angle +
+    # 180 deg` -- NOT by calling `sky_angle_to_offaxis` / `offaxis_to_sky_angle`.
+    #
+    # To make this a single-draw, deterministic check (no KS test, no
+    # statistics) rather than a check on a distribution's mean, the orbital
+    # radius is pushed absurdly high (1e7 km) so rho collapses to
+    # ~0.0365 deg -- test 3 above already establishes every draw lands
+    # within rho of nadir, so at this radius EVERY draw, for EITHER law, is
+    # nadir to within 0.0365 deg, and `photon.direction` must match the
+    # hand-computed nadir direction to that same tight tolerance.
+    #
+    # `orbit_angle = 50 deg` and `attitude = 125 deg` are both deliberately
+    # non-zero and mutually distinct, so a bug that swaps them, drops one,
+    # or uses the wrong sign cannot pass by coincidence the way it could at
+    # the degenerate attitude = orbit_angle = 0 deg.
+    detector = _make_tracker()
+    earth = _make_earth()
+
+    orbit_angle = 50 * u.deg
+    attitude = 125 * u.deg
+    r = 1.0e7 * u.km
+    pose = SpacecraftInterval(start_time=0 * u.s, stop_time=1 * u.s, livetime=1 * u.s,
+                              orbit_radius=r, orbit_angle=orbit_angle, attitude=attitude)
+
+    rho_deg = np.degrees(np.arcsin(EARTH_RADIUS.to_value(u.km) / r.to_value(u.km)))
+    assert rho_deg == pytest.approx(0.0365, abs=0.0005)
+
+    nadir_deg = (orbit_angle + 180 * u.deg).to_value(u.deg)
+    expected_nu_deg = _wrap180(attitude.to_value(u.deg) - nadir_deg)
+    expected_direction_deg = (270.0 - expected_nu_deg) % 360.0
+    assert expected_nu_deg == pytest.approx(-105.0)
+    assert expected_direction_deg == pytest.approx(15.0)
+
+    for law in ('lambertian', 'isotropic'):
+        source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM,
+                                   law=law, earth=earth)
+
+        n = 60
+        for _ in range(n):
+            photon = source.random_photon(detector, pose=pose, earth=earth)
+            assert photon is not None
+
+            direction_deg = photon.direction.to_value(u.deg)
+            diff = ((direction_deg - expected_direction_deg + 180.0) % 360.0) - 180.0
+
+            assert abs(diff) <= rho_deg + 1e-6, (
+                f"{law}: photon.direction = {direction_deg} deg is "
+                f"{diff} deg from the hand-computed nadir direction "
+                f"{expected_direction_deg} deg (tolerance {rho_deg} deg)")
 
 
 # --- 4. the sampled beta distribution passes a KS test against pdf ~ 1/s --
@@ -440,14 +706,31 @@ def test_isotropic_is_limb_brightened_relative_to_lambertian():
 # --- 7. the albedo is not suppressed by occultation (trap 1) --------------
 
 def test_earth_albedo_is_not_suppressed_by_occultation():
-    # Trap 1 / Section 8.1: occultable = False must survive a REAL
-    # InertialSimulator run over a full circular orbit, not just the bare
-    # property. Same geometry as
-    # `tests/test_inertial_simulator.py::test_circular_orbit_occults_a_point_source_for_the_analytic_rho_over_pi`
-    # (EARTH_RADIUS = 6371 km, ORBIT_RADIUS = 6771 km, rho/pi = 0.3900): over
-    # a full orbit an ordinary far-field PointSource is occulted for a
-    # fraction rho/pi of its photons, while the EarthAlbedoSource, mixed
-    # into the SAME run, must lose none of its mu = 1200 mean at all.
+    # Trap 1 / Section 8.1. Precisely what this test does and does NOT show:
+    # today, `EarthAlbedoSource.random_photon` never calls `self._occulted`
+    # at all (unlike `PointSource`/`IsotropicSource`/`ExtendedSource`, which
+    # each do) -- its immunity to occultation is structural, coming from
+    # only ever sampling |beta| < beta_max (surface points actually visible
+    # from the spacecraft), not from consulting `occultable`. So this test
+    # is NOT independent confirmation that `occultable` is wired into a live
+    # rejection path -- flipping `occultable` to `True` alone leaves this
+    # test passing (only the direct property test,
+    # `test_occultable_is_false_for_both_laws`, catches that). What this
+    # test DOES guard is the regression that would matter most: if a future
+    # change added an `_occulted(...)` check to `random_photon` (the pattern
+    # every other far-field source uses), it would occult essentially ALL of
+    # the albedo's own photons, not merely a fraction -- every drawn sky
+    # angle sits within rho of the CURRENT nadir by construction (test 3
+    # above), and the albedo re-aims to that current nadir every single
+    # draw, so it is never on the "unoccluted" side the way a fixed-sky-
+    # angle source sometimes is over an orbit (checked directly: applying
+    # `Earth._is_occulted` to 2000 of this test's own draws, post hoc,
+    # occults 2000/2000 = 100% of them). n_albedo would collapse from
+    # ~1200 to ~0, astronomically far from the assertion below -- this test
+    # has ample power against that regression. Mixing an ordinary
+    # PointSource into the SAME run, which the geometry predicts loses only
+    # a fraction rho/pi = 0.3900 of ITS photons over a full orbit, is the
+    # contrast that shows the albedo behaving differently in practice today.
     earth = _make_earth()
     detector = _make_tracker()
 
@@ -579,3 +862,179 @@ def test_occultable_is_false_for_both_laws():
     for law in ('lambertian', 'isotropic'):
         source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM, law=law)
         assert source.occultable is False
+
+
+# ===========================================================================
+# GAP 2: plot()
+# ===========================================================================
+
+def test_plot_raises_before_any_photon_has_been_drawn():
+    # `EarthAlbedoSource.plot` has no pose of its own -- it only knows
+    # where nadir is, and rho, once a photon has actually been drawn at
+    # some pose. Mirrors the same requirement `PointSource(sky_angle=...)`
+    # and `ExtendedSource` already have.
+    detector = _make_tracker()
+    source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM)
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    detector.plot(ax=ax)
+
+    with pytest.raises(RuntimeError):
+        source.plot(ax, detector)
+
+    plt.close(fig)
+
+
+def test_plot_arc_is_centred_on_nadir_with_the_full_earth_diameter_as_extent():
+    # After a draw, `plot` must show an arc of angular width `2 rho` (the
+    # Earth's full apparent diameter) centred on nadir in the detector
+    # frame -- exactly the patch of sky every sampled photon can come from
+    # (test 3 above). `expected_center` uses `sky_angle_to_offaxis`, the
+    # SAME helper `ExtendedSource`'s own analogous plot test
+    # (`test_extended_source_plot_arc_is_centred_on_the_sky_angle_not_last_draw`
+    # in `test_near_and_extended_sources.py`) uses -- this is checking which
+    # POSE `plot` reflects (current vs. stale), a different property from
+    # whether the coordinate transform itself is correct, which is pinned
+    # directly on `photon.direction`, independent of this helper, by
+    # `test_random_photon_direction_matches_a_hand_computed_value_at_a_known_pose`
+    # above (the TQ3 fix).
+    detector = _make_tracker()
+    earth = _make_earth()
+    RE = EARTH_RADIUS.to_value(u.km)
+    r = ORBIT_RADIUS.to_value(u.km)
+    rho_deg = np.degrees(np.arcsin(RE / r))
+
+    orbit_angle = 65 * u.deg
+    attitude = 40 * u.deg
+    pose = _pose(ORBIT_RADIUS, orbit_angle=orbit_angle, attitude=attitude)
+
+    source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM,
+                               law='lambertian', earth=earth)
+
+    photon = source.random_photon(detector, pose=pose, earth=earth)
+    assert photon is not None
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    detector.plot(ax=ax)
+    source.plot(ax, detector)
+
+    line = ax.get_lines()[-1]
+    xdata, ydata = line.get_xdata(), line.get_ydata()
+
+    center = detector.surrounding_circle_center
+    cx = center.x.to(u.cm).value
+    cy = center.y.to(u.cm).value
+
+    mid_x = xdata[len(xdata) // 2] - cx
+    mid_y = ydata[len(ydata) // 2] - cy
+    plotted_center_deg = np.degrees(np.arctan2(mid_x, mid_y))
+
+    angle0_deg = np.degrees(np.arctan2(xdata[0] - cx, ydata[0] - cy))
+    angle1_deg = np.degrees(np.arctan2(xdata[-1] - cx, ydata[-1] - cy))
+
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+
+    plt.close(fig)
+
+    nadir = orbit_angle + 180 * u.deg
+    expected_center = sky_angle_to_offaxis(nadir, attitude)
+
+    diff = ((plotted_center_deg - expected_center.to_value(u.deg) + 180) % 360) - 180
+    assert abs(diff) < 1.0
+
+    extent_deg = abs(((angle1_deg - angle0_deg + 180) % 360) - 180)
+    assert extent_deg == pytest.approx(2 * rho_deg, abs=0.5)
+
+    # PR 4's off-screen trap (Section 8, item 5's sibling regressions in
+    # `test_near_and_extended_sources.py`): the arc must actually be inside
+    # the visible axes, not clipped out of view.
+    assert xlim[0] <= xdata.min() and xdata.max() <= xlim[1]
+    assert ylim[0] <= ydata.min() and ydata.max() <= ylim[1]
+
+
+# ===========================================================================
+# GAP 3: normalization
+# ===========================================================================
+
+def test_normalization_returns_the_emissivity_not_the_pose_dependent_flux():
+    # `normalization` (used polymorphically by `diff_flux`, `integrate_flux`,
+    # `discretize_spectrum` and `plot_spectrum`) must be the pose-FREE
+    # emissivity, not `flux(pose)` -- `flux` needs a pose and, for the
+    # Lambertian law (Section 5.6), returns `emissivity * rho`, not the bare
+    # emissivity. Pinned by checking the two actually differ numerically
+    # (rho != 1 rad at this altitude, so they can't coincide) and that
+    # `flux(pose) == normalization * rho` exactly -- stronger than merely
+    # checking `normalization` is "some positive 1/cm/s number", which a
+    # `normalization` that fell through to `flux(pose)`'s value could also
+    # satisfy by accident.
+    earth = _make_earth()
+    emissivity = 4.2 / u.cm / u.s
+    source = EarthAlbedoSource(emissivity=emissivity, spectrum=SPECTRUM,
+                               law='lambertian', earth=earth)
+
+    normalization_value = source.normalization.to_value(1 / u.cm / u.s)
+    assert normalization_value == pytest.approx(emissivity.to_value(1 / u.cm / u.s), rel=1e-12)
+
+    pose = _pose(ORBIT_RADIUS)
+    flux_value = source.flux(pose).to_value(1 / u.cm / u.s)
+
+    rho_rad = np.arcsin(EARTH_RADIUS.to_value(u.km) / ORBIT_RADIUS.to_value(u.km))
+    assert rho_rad == pytest.approx(1.2254, abs=0.001)  # comfortably != 1 rad
+
+    assert normalization_value != pytest.approx(flux_value, rel=1e-3)
+    assert flux_value == pytest.approx(normalization_value * rho_rad, rel=1e-9)
+
+
+# ===========================================================================
+# Regression: InertialSimulator rejects a mismatched EarthAlbedoSource Earth
+# at CONSTRUCTION, not only per photon (fix commit 641ab3a)
+# ===========================================================================
+
+def test_inertial_simulator_rejects_a_mismatched_albedo_earth_at_construction():
+    # `EarthAlbedoSource` carries its own `Earth` (it needs R_E for its own
+    # geometry); if that disagrees with the simulator's own `Earth`, the run
+    # silently mixes two planets -- caught previously only per photon
+    # (`EarthAlbedoSource._check_earth`, inside `random_photon`), which
+    # means a run whose Poisson draw happens to come up empty for that
+    # source finishes with no error at all, having computed its expected
+    # count from the wrong Earth the whole time. `InertialSimulator` must
+    # now catch this eagerly, at construction.
+    #
+    # The realistic trap this guards, called out explicitly in the fix
+    # commit: astropy's default `Earth()` uses R_E = 6378.1 km, while this
+    # project's own tests and notebooks use 6371 km -- so the plain
+    # `EarthAlbedoSource(emissivity, spectrum)` form (no explicit `earth=`)
+    # is exactly the mismatching one against an explicit
+    # `Earth(radius = 6371 km)` simulator, which is what this test uses.
+    detector = _make_tracker()
+    simulator_earth = _make_earth()  # EARTH_RADIUS = 6371 km, explicit
+
+    duration = 1000 * u.s
+    history = _make_history(duration, 1, simulator_earth)
+
+    source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM)
+    # Sanity: this really is the mismatching, no-`earth=` form the fix
+    # commit is about, and the two radii really do differ.
+    assert source.earth.radius != simulator_earth.radius
+
+    with pytest.raises(ValueError):
+        InertialSimulator(detector=detector, sources=[source],
+                          reconstructor=SimpleTraditionalReconstructor(),
+                          spacecraft_history=history, earth=simulator_earth)
+
+    # The matching form -- explicit earth = the simulator's own -- must
+    # construct cleanly.
+    matching_source = EarthAlbedoSource(emissivity=1 / u.cm / u.s, spectrum=SPECTRUM,
+                                        earth=simulator_earth)
+    InertialSimulator(detector=detector, sources=[matching_source],
+                      reconstructor=SimpleTraditionalReconstructor(),
+                      spacecraft_history=history, earth=simulator_earth)
