@@ -157,19 +157,30 @@ class InertialSimulator(SimulatorBase):
           `None` and would otherwise blow up as a `TypeError` inside the
           Poisson mean, thousands of photons into the run;
         - a far-field source aimed by a fixed detector-frame `offaxis_angle`,
-          which would quietly ignore the spacecraft's attitude entirely.
+          which would quietly ignore the spacecraft's attitude entirely;
+        - a source carrying its own `Earth` that disagrees with this
+          simulator's. `EarthAlbedoSource` needs an Earth radius to compute
+          its own geometry, so it holds one; if that is not the Earth the
+          history was built with, the run silently mixes two planets. Its
+          own per-photon check would catch it eventually, but only once a
+          photon is actually drawn -- and a source whose Poisson draw comes
+          up empty would let a whole run finish with no error at all, having
+          computed every expected count from the wrong Earth. The default
+          `Earth()` uses astropy's 6378.1 km while much of this project uses
+          6371 km, so the plain `EarthAlbedoSource(E, spectrum)` form is
+          exactly the one that mismatches.
 
         Raises
         ------
         ValueError
             Naming the offending source, its index in `self.sources`, and
-            which of the two problems it has.
+            which of the three problems it has.
         """
 
         # A pose the sources can actually be evaluated at: the flux of a
-        # far-field source is pose-independent today, but the Earth albedo
-        # (a later PR) has a flux that depends on the orbital radius, and
-        # would have no answer at all for `pose = None`.
+        # far-field source is pose-independent for most sources, but
+        # `EarthAlbedoSource`'s depends on the orbital radius and would have
+        # no answer at all for `pose = None`.
         first_pose = next(iter(self.spacecraft_history), None)
 
         for i, source in enumerate(self.sources):
@@ -196,6 +207,20 @@ class InertialSimulator(SimulatorBase):
                     f"{label} has no normalization set, so there is no rate "
                     "to draw a photon count from. Give it a `flux` (far-field) "
                     "or a `rate` (near-field) before simulating.")
+
+            # A source that carries its own Earth must be carrying THIS one.
+            # `EarthAlbedoSource` re-checks per photon, but that is too late:
+            # a run whose Poisson draw comes up empty would finish silently
+            # with every expected count computed from the wrong planet.
+            source_earth = getattr(source, 'earth', None)
+            if source_earth is not None and source_earth.radius != self.earth.radius:
+                raise ValueError(
+                    f"{label} emits from an Earth of radius "
+                    f"{source_earth.radius}, but this simulator uses "
+                    f"{self.earth.radius}. The two must agree, or the run "
+                    "mixes two planets: the source's geometry says one thing "
+                    "and the occultation test another. Pass the same `Earth` "
+                    "to both, e.g. `EarthAlbedoSource(..., earth = earth)`.")
 
     @property
     def nsources(self):

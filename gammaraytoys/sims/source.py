@@ -347,7 +347,7 @@ class FarFieldSource(Source):
 
         The default implementation simply returns `self._flux` and ignores
         `pose` -- true for every far-field source in this codebase except
-        the (future) Earth-albedo source, whose apparent flux depends on the
+        the Earth-albedo source, whose apparent flux depends on the
         spacecraft's orbital radius. Subclasses that need pose-dependence
         override this method; `normalization` and `simulated_rate()` then
         follow automatically. Concrete subclasses set `self._flux` in their
@@ -420,7 +420,7 @@ class FarFieldSource(Source):
 
         `True` for every source whose photons genuinely arrive from the
         distant sky, which is every far-field source in this package except
-        the Earth albedo: `EarthAlbedoSource` (added in a later PR)
+        the Earth albedo: `EarthAlbedoSource`
         overrides this to `False`, because its photons come from the
         Earth's direction *by construction* and a blanket occultation test
         would reject all of them (Section 8.1 of the plan).
@@ -618,8 +618,8 @@ class FarFieldSource(Source):
         on `center_angle`.
 
         This is the shared primitive behind `IsotropicSource.plot` (called
-        with `extent = 360 deg`, tracing a full circle) and, in later PRs,
-        `ExtendedSource` and `EarthAlbedoSource`, which will call it with
+        with `extent = 360 deg`, tracing a full circle) and also by
+        `ExtendedSource` and `EarthAlbedoSource`, which call it with
         their own characteristic angular extent (a von Mises width, or the
         Earth's angular radius `rho`) instead of the whole sky. The arc uses
         the same `(sin Nu, cos Nu)` convention and marker radius as
@@ -672,8 +672,7 @@ class FarFieldSource(Source):
 class NearFieldSource(Source):
     """
     Abstract base class for sources at a fixed position near the detector,
-    rather than at infinite distance on the sky (see `NearPointSource`,
-    added in a later PR).
+    rather than at infinite distance on the sky (see `NearPointSource`).
 
     Normalized by a total emission rate in `1/s` rather than a flux: "flux"
     -- a brightness per unit length of sky -- is not a meaningful quantity
@@ -715,8 +714,7 @@ class NearFieldSource(Source):
         Unlike a far-field source, a near-field source's location is a
         genuine detector-frame position rather than a direction -- it can
         sit inside the detector's surrounding circle entirely. Implemented
-        by concrete near-field sources, e.g. `NearPointSource` (added in a
-        later PR).
+        by concrete near-field sources, e.g. `NearPointSource`.
 
         Returns
         -------
@@ -1231,7 +1229,7 @@ class IsotropicSource(FarFieldSource):
         Draws the sky circle (`plot_sky_circle`) and a full 360 deg arc
         just outside it (`plot_sky_arc`), representing uniform coverage of
         the whole sky -- the same arc primitive `ExtendedSource` and
-        `EarthAlbedoSource` will reuse in later PRs with a narrower extent.
+        `EarthAlbedoSource` reuses with a narrower extent.
 
         Parameters
         ----------
@@ -2125,7 +2123,7 @@ class EarthAlbedoSource(FarFieldSource):
         # Section 5.6's `r^2 + R_E^2 - 2 r R_E cos beta`, but computed
         # without the catastrophic cancellation the literal form suffers
         # when `r` is very close to `R_E`: there it loses every significant
-        # digit of `r - R_E` and returns `s(0) = 0` exactly, which turns the
+        # digit of `r - R_E` and loses all significance at sub-micron altitudes, where it would return `s(0) = 0`, which turns the
         # pdf into `inf` and the normalized CDF into `nan` -- silently, so
         # every sampled sky angle would come out `nan`. Written this way the
         # smallest value it can produce is `(r - R_E)^2 > 0`.
@@ -2224,6 +2222,41 @@ class EarthAlbedoSource(FarFieldSource):
         self._update_geometry(pose.orbit_radius)
 
         return (self.emissivity * self._flux_factor).to(1/u.cm/u.s)
+
+    def simulated_rate(self, detector, pose = None):
+        """
+        Rate of photons launched at the detector, in `1/s`.
+
+        `flux(pose) * detector.throwing_plane_size`, exactly as for any other
+        far-field source -- this override exists only because the inherited
+        docstring is wrong for this class on both counts: `pose` is required
+        rather than optional, and the return is never `None`.
+
+        Parameters
+        ----------
+        detector : `ToyTracker2D`
+            The detector photons are thrown at; supplies the throwing-plane
+            size `2a`.
+        pose : `SpacecraftInterval`
+            Spacecraft pose. **Required**, unlike every other far-field
+            source: this source's flux depends on how much sky the Earth
+            fills, and so on `pose.orbit_radius`.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+            The rate in `1/s`. Never `None`: the emissivity is validated as
+            strictly positive at construction, so this source cannot be
+            unnormalized.
+
+        Raises
+        ------
+        ValueError
+            If `pose` is `None`, or its `orbit_radius` does not exceed the
+            Earth's radius.
+        """
+
+        return super().simulated_rate(detector, pose)
 
     @property
     def normalization(self):
