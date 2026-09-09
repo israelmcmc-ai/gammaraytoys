@@ -41,8 +41,8 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 3 | `InertialSimulator`, transforms, occultation | merged | **Merged** (PR #15) |
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
-| 6 | Time-dependent scaling + event CSV I/O | `claude/cosimita-pr6-scaling-and-event-io` | **Open as PR #20**, awaiting maintainer review. 438 tests |
-| 7 | YAML configuration | — | Not started |
+| 6 | Time-dependent scaling + event CSV I/O | merged | **Merged** (PR #20) |
+| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | Implementer running |
 
 Side PRs, outside the seven:
 
@@ -339,6 +339,15 @@ backend and silently strips every figure while still exiting 0.
   was set only in each concrete `__init__`, so a third-party subclass -- including the
   demo source in the shipped notebook 00 -- crashed inside `run_events` with
   `AttributeError`. One class-level default keeps a new feature backward compatible.
+- **The plan's expression-evaluator defence is insufficient, and PR 7's contract says
+  so with evidence.** Whitelist-plus-reject-`__` blocks every attack the plan names,
+  but three expressions carry no `__` at all: `9**9**9**9` hangs the process
+  (measured: killed at 6 s), and `(lambda: 1)()` and `t.real.conjugate()` are simply
+  allowed. The last matters most -- attribute access is permitted, and today's
+  whitelist exposing nothing useful through it is luck, not a property. Use an AST
+  whitelist rejecting `ast.Attribute` and `ast.Lambda`. For the arithmetic DoS,
+  reject chained `**` and integer *literal* exponents above 64; a naive "exponent
+  must be a literal <= 64" rule is too strict and rejects `2**t`.
 - **Compare a new source's speed against the sibling that does the same work.** PR 4's
   implementer measured `ExtendedSource` at ~625 us against `PointSource`'s ~200 us and
   believed it had blown constraint 2's 50% budget. But a `PointSource` with a fixed
