@@ -30,6 +30,47 @@ Passing `spacecraft_history` (the same history the run used) lets
 `true_sky_angle_deg` be recovered exactly, per photon, for every far-field
 source -- see `write_event_csv` for why it is not populated by guesswork
 without one.
+
+What the ground-truth columns mean
+----------------------------------
+
+**`true_x_cm`, `true_y_cm` -- where the photon started, which is not where
+its source is.** For a `NearFieldSource` these are the source's own fixed
+detector-frame position, and mean exactly what they look like. For a
+far-field source they are a point on the detector's **throwing plane**: the
+line segment of length `2a` that photons from that direction are launched
+from, tangent to the surrounding circle. That is a simulation device, not
+astrophysics -- the source is at infinite distance and has no position, so
+these two columns say only "this is the point on the launch segment this
+particular photon happened to start from". Distances from the circle's
+centre therefore run from `a` (the middle of the segment) out to `a*sqrt(2)`
+(its ends), never less. Do not read a far-field source's location out of
+them; there is none.
+
+**The three angle columns are three different questions.** For a photon of a
+`sky_angle = 40 deg` source drawn at an attitude of `A`, a real row reads
+`true_direction_deg = 310.0`, `true_offaxis_angle_deg = -40.0`,
+`true_sky_angle_deg = 40.0`:
+
+- **`true_direction_deg`** -- the direction the photon is *travelling*, in
+  the **detector** frame, measured counter-clockwise from the detector's +x
+  axis. This is `Photon.direction` verbatim, the quantity
+  `detector.simulate_event` actually propagates.
+- **`true_offaxis_angle_deg`** -- `Nu`, the direction the photon *came
+  from*, still in the **detector** frame. It is the same information seen
+  from the other end: `Nu = 270 deg - direction` (Section 3.2). A source
+  directly on-axis has `Nu = 0`, whatever the spacecraft is doing.
+- **`true_sky_angle_deg`** -- `lambda`, the direction the photon came from
+  in the **inertial** frame, i.e. where it is on the actual sky:
+  `lambda = A - Nu` (Section 3.4). This is the only one of the three that is
+  independent of where the spacecraft was pointing, which is why it is the
+  one worth fitting a sky position against -- and why recovering it needs
+  the attitude, hence `spacecraft_history`.
+
+So `direction` is where it is going, `Nu` is where it came from as the
+instrument sees it, and `lambda` is where it came from as the universe sees
+it. A rotating spacecraft changes the first two photon by photon while the
+third stands still, which is the whole point of Section 3.
 """
 
 import numpy as np
