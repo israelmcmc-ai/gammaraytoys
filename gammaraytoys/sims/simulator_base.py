@@ -22,7 +22,33 @@ class SimulatorBase:
     it through the source transformations (Section 6 of the plan). What is
     shared here is bookkeeping -- the Compton Data Space axes and the
     per-photon simulate/reconstruct/fill sequence.
+
+    Attributes
+    ----------
+    source_names : dict or None
+        Maps each named `Source` in this run to its name, in the shape
+        `write_event_csv`'s own `source_names` argument wants. Set by
+        `from_config` from the `name` key of each source block; `None` for
+        a simulator built directly, which labels events by class name.
+    random_seed : int or None
+        The seed `from_config` seeded numpy's global generator with, kept
+        so that a run can say how it was seeded. `None` when no seed was
+        given.
+
+    Both carry a class-level default so that a simulator built directly --
+    or a third-party subclass that never runs this `__init__` -- still has
+    them rather than raising `AttributeError` from inside `write_event_csv`
+    or `to_config`.
     """
+
+    source_names = None
+    random_seed = None
+
+    # The `earth` block a configuration named, for `to_config`. Only the
+    # inertial simulator has an `earth` of its own; the detector-frame one
+    # may still have been given one, for an `EarthAlbedoSource` to emit
+    # from, and would otherwise lose it on the way back out.
+    _config_earth = None
 
     def __init__(self, detector, reconstructor, doppler_broadening = True):
         """

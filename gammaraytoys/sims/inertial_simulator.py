@@ -4,6 +4,7 @@ from tqdm import tqdm
 
 from .source import Source
 from .simulator_base import SimulatorBase
+from .config import simulator_from_config, simulator_to_config
 
 
 class InertialSimulator(SimulatorBase):
@@ -41,6 +42,15 @@ class InertialSimulator(SimulatorBase):
     analytic visible-fraction it also handles isotropic and extended sources
     with no bespoke truncation maths per source class.
     """
+
+    # The `spacecraft_history` entry a configuration named -- a path, or an
+    # orbit block -- recorded by `from_config` for `to_config`. A generated
+    # `SpacecraftHistory` keeps only its sampled rows, not the orbital
+    # elements that produced them, and one read from a file does not
+    # remember the file, so neither can be recovered from the object. Class
+    # level, so a simulator built directly still answers `None` rather than
+    # raising `AttributeError`.
+    _config_spacecraft_history = None
 
     def __init__(self, detector, sources, reconstructor, spacecraft_history,
                  earth, doppler_broadening = True):
@@ -107,6 +117,92 @@ class InertialSimulator(SimulatorBase):
         self.nsim = 0
         self.ntrig = 0
         self.noccult = 0
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Build an `InertialSimulator` from a YAML configuration (Section 7
+        of the plan).
+
+        The configuration is either a path to a YAML file or an
+        already-parsed mapping, and every call builds its own fresh
+        objects: two simulators built from the same configuration share no
+        source, no spectrum and no scaling. That matters -- a `PointSource`
+        given a `sky_angle` re-aims itself on every draw, so handing one
+        source to two runs would let them interfere.
+
+        The schema is documented in `gammaraytoys.sims.config`, whose
+        `*_from_config` functions build each piece and whose `*_to_config`
+        functions write them back out. Unknown keys are an error at every
+        level, and a malformed unit raises naming the key it came from.
+
+        The `spacecraft_history` entry is required, and is either a path to
+        a `.ori` file or a block describing an orbit to generate (see
+        `gammaraytoys.sims.config.spacecraft_history_from_config`). The
+        single `earth` block is wired into the history, into any
+        `TargetedPointing` strategy and into any `EarthAlbedoSource`, so a
+        configuration cannot produce a run with two different planets.
+
+        Parameters
+        ----------
+        config : str, path-like or mapping
+            The configuration: a path to a YAML file, or an already-parsed
+            mapping. The mapping is never modified.
+
+        Returns
+        -------
+        InertialSimulator
+            The simulator, with `source_names` and `random_seed` set from
+            the configuration. When a `random_seed` was given, numpy's
+            global generator is seeded with it as the very last thing this
+            does, so that the run that follows is reproducible: two
+            `from_config` calls with the same seed, each followed by a run,
+            give byte-identical event streams.
+
+        Raises
+        ------
+        ValueError
+            On an unknown or missing key, a value that is not a quantity or
+            has the wrong unit, or anything the simulator and its parts
+            reject at construction -- an unnormalized source, a far-field
+            source aimed in the detector frame, or an Earth that disagrees
+            with the orbit.
+        TypeError
+            If `config` is neither a path nor a mapping.
+        """
+
+        return simulator_from_config(cls, config, inertial = True)
+
+    def to_config(self):
+        """
+        Write this simulator back out as a configuration.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A configuration `from_config` reads back into an equal
+            simulator, holding only plain strings, numbers, lists and
+            dictionaries, so `yaml.safe_dump` can write it straight out.
+            It is *canonical*: keys left at their default are omitted and
+            aliases are resolved, so it may be spelled differently from the
+            configuration this simulator was built from while describing
+            exactly the same run.
+
+        Raises
+        ------
+        ValueError
+            If this simulator was not built by `from_config` -- its
+            spacecraft history then cannot be written, since a generated
+            `SpacecraftHistory` keeps only its sampled rows and one read
+            from a file does not remember the file -- or if any part of it
+            is not something a configuration can describe.
+        """
+
+        return simulator_to_config(self)
 
     def _validate_earth(self):
         """

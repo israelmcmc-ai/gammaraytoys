@@ -219,6 +219,36 @@ class TabulatedScaling(SourceScaling):
         self._time_s = time_s
         self._scale = scale
 
+    @property
+    def time(self):
+        """
+        `astropy.units.Quantity`: the breakpoint times, in seconds.
+
+        A copy, not the stored array: the lookup in `__call__` assumes the
+        times are still strictly increasing, and handing out the array
+        itself would let a caller break that assumption in place, long
+        after `__init__` validated it.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._time_s.copy() * u.s
+
+    @property
+    def scale(self):
+        """
+        numpy.ndarray: the scale at (and after) each breakpoint.
+
+        A copy, for the same reason as `time`: every value was validated
+        finite and non-negative at construction.
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+        return self._scale.copy()
+
     @classmethod
     def open(cls, filename):
         """

@@ -91,6 +91,18 @@ class ToyTracker2D:
         return self._layer_pos
 
     @property
+    def layer_thickness(self):
+        """
+        `astropy.units.Quantity`: thickness of each layer, one entry per
+        layer (a scalar given to the constructor is broadcast).
+
+        `mass_thickness` is this multiplied by the material density, and is
+        what the event simulation actually walks on; this is the geometric
+        thickness as it was given, which is what a configuration file names.
+        """
+        return self._layer_thickness
+
+    @property
     def mass_thickness(self):
         return self._mthick
 
