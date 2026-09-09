@@ -11,6 +11,7 @@ from histpy import Histogram, Axis
 from scipy.stats import vonmises
 from scipy.integrate import quad, cumulative_trapezoid
 from .earth import Earth
+from .scaling import SourceScaling, ConstantScaling
 
 # `ToyTracker2D.plot()` hardcodes its data coordinates to this unit -- every
 # source marker drawn on top of it must match, or it lands in the right
@@ -90,6 +91,15 @@ class Source(ABC):
       position near the detector). Exposes that rate through `rate`.
     """
 
+    # Class-level default so a Source subclass written before `scaling`
+    # existed -- or any third-party one that never calls a base `__init__`
+    # -- keeps working. Without it the `scaling` getter raises
+    # `AttributeError: no attribute '_scaling'` from inside `run_events`,
+    # which is exactly what the DemoNearFieldSource in
+    # `docs/examples/cosimita/00-source_normalization.ipynb` does.
+    _scaling = None
+
+
     @property
     @abstractmethod
     def normalization(self):
@@ -123,6 +133,57 @@ class Source(ABC):
             The (unit-normalized) shape of the source's energy distribution.
         """
         pass
+
+    @property
+    def scaling(self):
+        """
+        `SourceScaling`: unitless, time-dependent multiplier on this
+        source's normalization (`docs/dev/inertial_sim_plan.md`, Section
+        5.7).
+
+        `InertialSimulator` evaluates it once per interval, at that
+        interval's midpoint, and multiplies it into the Poisson mean
+        alongside `simulated_rate()` and the interval's livetime (Section
+        6). It plays no role at all outside `InertialSimulator` -- the
+        detector-frame `Simulator` never reads it. Every concrete source
+        sets this from a `scaling` constructor argument; `None` (the
+        default there) is turned into `ConstantScaling(1.0)` here, i.e. "no
+        scaling", so a source built without one behaves exactly as it did
+        before this existed.
+
+        Returns
+        -------
+        `SourceScaling`
+            This source's scaling.
+
+        Raises
+        ------
+        TypeError
+            On assignment, if the new value is neither `None` nor a
+            `SourceScaling`.
+        """
+
+        # `_scaling` defaults to `None` at class level, so a subclass that
+        # never runs a base `__init__` -- the demo source in notebook 00,
+        # for one -- still gets "no scaling" rather than an AttributeError
+        # from inside a run.
+        if self._scaling is None:
+            return ConstantScaling(1.0)
+
+        return self._scaling
+
+    @scaling.setter
+    def scaling(self, scaling):
+
+        if scaling is None:
+            scaling = ConstantScaling(1.0)
+
+        if not isinstance(scaling, SourceScaling):
+            raise TypeError(
+                f"scaling must be a SourceScaling (or None, meaning "
+                f"ConstantScaling(1.0)); got {type(scaling).__name__}.")
+
+        self._scaling = scaling
 
     def diff_flux(self, energy):
         """
@@ -898,7 +959,7 @@ class PointSource(FarFieldSource):
     def __init__(self, offaxis_angle = None, spectrum = None,
                  flux = None, flux_pivot = None, pivot_energy = None,
                  chirality = None, chirality_degree = 0,
-                 sky_angle = None):
+                 sky_angle = None, scaling = None):
         """
         Parameters
         ----------
@@ -941,6 +1002,11 @@ class PointSource(FarFieldSource):
             with `offaxis_angle`: give exactly one of the two. A source
             given a `sky_angle` can only be drawn from with a `pose` (see
             `random_photon`).
+        scaling : `SourceScaling`, optional
+            Time-dependent multiplier on this source's flux, evaluated by
+            `InertialSimulator` once per interval (see `Source.scaling`).
+            `None` (the default) means `ConstantScaling(1.0)`, i.e. no
+            scaling.
 
         Raises
         ------
@@ -962,6 +1028,7 @@ class PointSource(FarFieldSource):
         self._spectrum = spectrum
         self.chirality = chirality
         self.chirality_degree = chirality_degree
+        self.scaling = scaling
 
         self.sky_angle = sky_angle
 
@@ -1154,7 +1221,8 @@ class IsotropicSource(FarFieldSource):
     draw.
     """
 
-    def __init__(self, spectrum, flux = None, chirality = None, chirality_degree = 0):
+    def __init__(self, spectrum, flux = None, chirality = None, chirality_degree = 0,
+                 scaling = None):
         """
         Parameters
         ----------
@@ -1176,12 +1244,18 @@ class IsotropicSource(FarFieldSource):
             source is unpolarized unless asked otherwise. Ignored if
             `chirality` is `None`, which is itself the default -- the
             photon then picks its own chirality at random.
+        scaling : `SourceScaling`, optional
+            Time-dependent multiplier on this source's flux, evaluated by
+            `InertialSimulator` once per interval (see `Source.scaling`).
+            `None` (the default) means `ConstantScaling(1.0)`, i.e. no
+            scaling.
         """
 
         self._spectrum = spectrum
         self.chirality = chirality
         self.chirality_degree = chirality_degree
         self._flux = flux
+        self.scaling = scaling
 
         # A single point source that gets aimed somewhere new for every photon,
         # rather than a throw-away PointSource per photon.
@@ -1329,7 +1403,7 @@ class NearPointSource(NearFieldSource):
     """
 
     def __init__(self, position, spectrum, rate = None,
-                chirality = None, chirality_degree = 0):
+                chirality = None, chirality_degree = 0, scaling = None):
         """
         Parameters
         ----------
@@ -1355,7 +1429,14 @@ class NearPointSource(NearFieldSource):
             source is unpolarized unless asked otherwise. Ignored if
             `chirality` is `None`, which is itself the default -- the
             photon then picks its own chirality at random.
+        scaling : `SourceScaling`, optional
+            Time-dependent multiplier on this source's rate, evaluated by
+            `InertialSimulator` once per interval (see `Source.scaling`).
+            `None` (the default) means `ConstantScaling(1.0)`, i.e. no
+            scaling.
         """
+
+        self.scaling = scaling
 
         # Copied rather than aliased: `NearPointSource(position =
         # detector.surrounding_circle_center)` is a natural thing to write, and
@@ -1553,7 +1634,7 @@ class ExtendedSource(FarFieldSource):
     """
 
     def __init__(self, sky_angle, width, spectrum, flux = None,
-                chirality = None, chirality_degree = 0):
+                chirality = None, chirality_degree = 0, scaling = None):
         """
         Parameters
         ----------
@@ -1584,6 +1665,11 @@ class ExtendedSource(FarFieldSource):
             source is unpolarized unless asked otherwise. Ignored if
             `chirality` is `None`, which is itself the default -- the
             photon then picks its own chirality at random.
+        scaling : `SourceScaling`, optional
+            Time-dependent multiplier on this source's flux, evaluated by
+            `InertialSimulator` once per interval (see `Source.scaling`).
+            `None` (the default) means `ConstantScaling(1.0)`, i.e. no
+            scaling.
         """
 
         self._spectrum = spectrum
@@ -1592,6 +1678,7 @@ class ExtendedSource(FarFieldSource):
         self.chirality = chirality
         self.chirality_degree = chirality_degree
         self._flux = flux
+        self.scaling = scaling
 
         # Validate eagerly, so a bad width raises where it was set rather
         # than on the first draw. `width` is public and mutable, so
@@ -1870,7 +1957,8 @@ class EarthAlbedoSource(FarFieldSource):
     """
 
     def __init__(self, emissivity, spectrum, law = 'lambertian',
-                 chirality = None, chirality_degree = 0, earth = None):
+                 chirality = None, chirality_degree = 0, earth = None,
+                 scaling = None):
         """
         Parameters
         ----------
@@ -1913,6 +2001,11 @@ class EarthAlbedoSource(FarFieldSource):
             `random_photon` still checks the `earth` it is handed against
             this one and raises if they disagree, so the source and the
             simulator cannot silently use two different Earths.
+        scaling : `SourceScaling`, optional
+            Time-dependent multiplier on this source's flux, evaluated by
+            `InertialSimulator` once per interval (see `Source.scaling`).
+            `None` (the default) means `ConstantScaling(1.0)`, i.e. no
+            scaling.
 
         Raises
         ------
@@ -1924,6 +2017,7 @@ class EarthAlbedoSource(FarFieldSource):
         """
 
         self._spectrum = spectrum
+        self.scaling = scaling
 
         # Geometry cache, keyed on everything it depends on. Initialised
         # before `law` is assigned, because that setter invalidates it.

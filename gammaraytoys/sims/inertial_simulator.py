@@ -23,12 +23,16 @@ class InertialSimulator(SimulatorBase):
     `gammaraytoys.coordinates.transform`), not by subclassing `Simulator`.
 
     Per interval and per source the photon count is drawn from a Poisson
-    distribution with mean `simulated_rate(detector, pose) * livetime` --
-    always Poisson, never a rounded expectation -- and each photon's timestamp
-    is drawn uniformly over the interval's **full span**, not just its live
-    fraction. Livetime only scales how many photons there are; spreading them
-    over the whole span keeps deadtime distributed through the interval rather
-    than parked as an artificial gap at its end.
+    distribution with mean `simulated_rate(detector, pose) * livetime *
+    source.scaling(interval.mid_time)` -- always Poisson, never a rounded
+    expectation -- and each photon's timestamp is drawn uniformly over the
+    interval's **full span**, not just its live fraction. Livetime only
+    scales how many photons there are; spreading them over the whole span
+    keeps deadtime distributed through the interval rather than parked as an
+    artificial gap at its end. `source.scaling` (see `Source.scaling` and
+    `SourceScaling`) is a unitless, time-dependent multiplier -- `1.0`
+    (`ConstantScaling(1.0)`) unless the source was built with one -- evaluated
+    once per interval, at its midpoint, never per photon.
 
     Occultation is a per-photon rejection drawn from the *unocculted* mean:
     `N` photons are drawn as if the Earth were not there, and each is then
@@ -274,7 +278,11 @@ class InertialSimulator(SimulatorBase):
         alone, so it has to be summed up front. It is the *unocculted*
         expectation, matching the means the Poisson draws are taken from --
         the occulted photons are drawn and then rejected, so they are counted
-        here too.
+        here too. Each interval's contribution includes that source's
+        time-dependent scaling (`Source.scaling`), evaluated at the
+        interval's midpoint, exactly as `run_events` does -- so this total
+        stays the true expectation of what `run_events` draws, scaled sources
+        included.
 
         Parameters
         ----------
@@ -291,7 +299,9 @@ class InertialSimulator(SimulatorBase):
 
         for pose, _, _, livetime in self._poses(tstart, tstop):
             for source in self.sources:
-                total += source.simulated_rate(self.detector, pose).to_value(u.Hz) * livetime
+                mu = (source.simulated_rate(self.detector, pose).to_value(u.Hz)
+                     * livetime * source.scaling(pose.mid_time))
+                total += mu
 
         return total
 
@@ -301,11 +311,12 @@ class InertialSimulator(SimulatorBase):
         launched at the detector.
 
         For every interval, and every source in it, the expected count
-        `mu = simulated_rate(detector, pose) * livetime` is formed and `N` is
-        drawn from `Poisson(mu)`. Each of those `N` photons gets a timestamp
-        uniform over the interval's full span and is drawn from the source at
-        that pose; a photon the Earth blocks is silently dropped and never
-        yielded, since it was never launched at all.
+        `mu = simulated_rate(detector, pose) * livetime *
+        source.scaling(interval.mid_time)` is formed and `N` is drawn from
+        `Poisson(mu)`. Each of those `N` photons gets a timestamp uniform over
+        the interval's full span and is drawn from the source at that pose; a
+        photon the Earth blocks is silently dropped and never yielded, since
+        it was never launched at all.
 
         Parameters
         ----------
@@ -343,7 +354,8 @@ class InertialSimulator(SimulatorBase):
 
                 for source in self.sources:
 
-                    mu = source.simulated_rate(self.detector, pose).to_value(u.Hz) * livetime
+                    mu = (source.simulated_rate(self.detector, pose).to_value(u.Hz)
+                         * livetime * source.scaling(pose.mid_time))
 
                     for _ in range(np.random.poisson(mu)):
 
