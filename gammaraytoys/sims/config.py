@@ -265,7 +265,7 @@ def _check_keys(block, where, allowed, required = ()):
 
 
 def _quantity(block, key, where, unit, default = None, required = False,
-              shape = 'scalar'):
+              minimum = None, maximum = None, shape = 'scalar'):
     """
     Read a unit-bearing value: a string astropy parses.
 
@@ -285,6 +285,13 @@ def _quantity(block, key, where, unit, default = None, required = False,
         Returned when `key` is absent and `required` is `False`.
     required : bool
         Whether the key must be present.
+    minimum, maximum : `astropy.units.Quantity`, 0 or None
+        Inclusive bounds, checked on every element when given. Almost
+        always `0`: a negative flux or a negative duration is not a
+        physical thing a user meant, and left alone it does not fail here
+        but deep inside numpy, at the first interval, with no idea which
+        key or which file it came from. A bare `0` is allowed because zero
+        is zero in any unit; any other bound must carry one.
     shape : {'scalar', 'array', 'any'}
         `'scalar'` demands a single value, `'array'` demands a
         one-dimensional array of at least one element, `'any'` accepts
@@ -300,7 +307,8 @@ def _quantity(block, key, where, unit, default = None, required = False,
     ValueError
         If the key is required and absent; if the value is not a string; if
         astropy cannot parse it; if its unit is not convertible to `unit`;
-        if it is not finite; or if its shape is not the one asked for.
+        if it is not finite; if it falls outside the bounds; or if its
+        shape is not the one asked for.
     """
 
     if key not in block:
@@ -340,6 +348,14 @@ def _quantity(block, key, where, unit, default = None, required = False,
     if not np.all(np.isfinite(quantity.value)):
         raise ValueError(
             f"{where}: key {key!r} = {text!r} must be finite.")
+
+    if minimum is not None and not np.all(quantity >= minimum):
+        raise ValueError(
+            f"{where}: key {key!r} = {text!r} must be >= {minimum}.")
+
+    if maximum is not None and not np.all(quantity <= maximum):
+        raise ValueError(
+            f"{where}: key {key!r} = {text!r} must be <= {maximum}.")
 
     ndim = np.ndim(quantity.value)
 
@@ -1859,26 +1875,36 @@ def source_from_config(config, where = 'source', earth = None):
         # and its message is better than anything invented here.
         kwargs['offaxis_angle'] = _quantity(block, 'offaxis_angle', where, u.deg)
         kwargs['sky_angle'] = _quantity(block, 'sky_angle', where, u.deg)
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'))
+        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
+                                   minimum = 0)
         kwargs['flux_pivot'] = _quantity(block, 'flux_pivot', where,
-                                         u.Unit('1 / (cm s keV)'))
-        kwargs['pivot_energy'] = _quantity(block, 'pivot_energy', where, u.keV)
+                                         u.Unit('1 / (cm s keV)'), minimum = 0)
+        kwargs['pivot_energy'] = _quantity(block, 'pivot_energy', where, u.keV,
+                                           minimum = 0)
         source_class = PointSource
 
     elif name == 'IsotropicSource':
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'))
+        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
+                                   minimum = 0)
         source_class = IsotropicSource
 
     elif name == 'NearPointSource':
         kwargs['position'] = _position_from_config(block, where)
-        kwargs['rate'] = _quantity(block, 'rate', where, u.Unit('1 / s'))
+        kwargs['rate'] = _quantity(block, 'rate', where, u.Unit('1 / s'),
+                                   minimum = 0)
         source_class = NearPointSource
 
     elif name == 'ExtendedSource':
         kwargs['sky_angle'] = _quantity(block, 'sky_angle', where, u.deg,
                                         required = True)
+        # No `minimum` on `width`: `ExtendedSource` demands a *strictly*
+        # positive one and says so much better than a bound here could
+        # ("for a source at a single exact direction use PointSource"), and
+        # its message already arrives with this block's `where` in front.
+        # The same goes for `EarthAlbedoSource`'s `emissivity` below.
         kwargs['width'] = _quantity(block, 'width', where, u.deg, required = True)
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'))
+        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
+                                   minimum = 0)
         source_class = ExtendedSource
 
     else:
@@ -2133,13 +2159,15 @@ def observation_strategy_to_config(strategy):
 _HISTORY_TYPES = {'elliptical_orbit': 'elliptical_orbit'}
 
 #: Orbit keys that are quantities, with the unit each must be convertible
-#: to. The remaining ones (`eccentricity`, `livetime_fraction`) are plain
-#: numbers.
-_ORBIT_QUANTITIES = {'semi_major_axis': u.km,
-                     'duration': u.s,
-                     'time_step': u.s,
-                     'argument_of_periapsis': u.deg,
-                     'initial_time': u.s}
+#: to and the smallest value it may take (`None` where it may be negative:
+#: an angle around the orbit and an epoch may both run backwards, a size and
+#: a span of time may not). The remaining ones (`eccentricity`,
+#: `livetime_fraction`) are plain numbers.
+_ORBIT_QUANTITIES = {'semi_major_axis': (u.km, 0),
+                     'duration': (u.s, 0),
+                     'time_step': (u.s, 0),
+                     'argument_of_periapsis': (u.deg, None),
+                     'initial_time': (u.s, None)}
 
 
 def spacecraft_history_from_config(config, where = 'spacecraft_history',
@@ -2258,8 +2286,8 @@ def _spacecraft_history_from_config(config, where, earth):
     kwargs = {}
     canonical = {'type': 'elliptical_orbit'}
 
-    for key, unit in _ORBIT_QUANTITIES.items():
-        value = _quantity(block, key, where, unit,
+    for key, (unit, minimum) in _ORBIT_QUANTITIES.items():
+        value = _quantity(block, key, where, unit, minimum = minimum,
                           required = (key == 'semi_major_axis'))
         if value is not None:
             kwargs[key] = value
