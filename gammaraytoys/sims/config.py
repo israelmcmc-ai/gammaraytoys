@@ -144,20 +144,15 @@ from pathlib import Path
 
 import numpy as np
 import yaml
-import astropy.units as u
 
-from .config_utils import (_as_mapping, _boolean, _check_keys, _format_quantity,
-                           _integer, _number, _quantity, _resolve_path,
-                           _searched_dir, _text, _type_name)
+from .config_utils import _as_mapping, _boolean, _check_keys, _integer, _text
 from .earth import Earth
-from .observation_strategy import ObservationStrategy
 from .reco import Reconstructor, SimpleTraditionalReconstructor
 from .source import Source
 from .spacecraft_history import SpacecraftHistory
 
 
 __all__ = ['load_config',
-           'spacecraft_history_from_config',
            'simulator_from_config', 'simulator_to_config']
 
 
@@ -232,189 +227,6 @@ def _config_base_dir(config):
         return Path(config).parent
 
     return None
-
-
-# ---------------------------------------------------------------------------
-# Observation strategies, spacecraft history, reconstructor
-# ---------------------------------------------------------------------------
-
-
-#: Accepted spellings of every generated-orbit type.
-_HISTORY_TYPES = {'elliptical_orbit': 'elliptical_orbit'}
-
-#: Orbit keys that are quantities, with the unit each must be convertible
-#: to and the smallest value it may take (`None` where it may be negative:
-#: an angle around the orbit and an epoch may both run backwards, a size and
-#: a span of time may not). The remaining ones (`eccentricity`,
-#: `livetime_fraction`) are plain numbers.
-_ORBIT_QUANTITIES = {'semi_major_axis': (u.km, 0),
-                     'duration': (u.s, 0),
-                     'time_step': (u.s, 0),
-                     'argument_of_periapsis': (u.deg, None),
-                     'initial_time': (u.s, None)}
-
-
-def spacecraft_history_from_config(config, where = 'spacecraft_history',
-                                   earth = None, base_dir = None):
-    """
-    Build a `SpacecraftHistory` from its configuration entry.
-
-    The entry is either a path to a `.ori` file:
-
-    ```yaml
-    spacecraft_history: iss.ori
-    ```
-
-    or an orbit to generate, which is how every cosimita notebook builds
-    one:
-
-    ```yaml
-    spacecraft_history:
-      type: elliptical_orbit
-      semi_major_axis: 6771 km
-      eccentricity: 0.0             # optional, default 0.0
-      duration: 6000 s              # optional, default one orbital period
-      time_step: 100 s              # optional, default 1 s
-      argument_of_periapsis: 0 deg  # optional, default 0 deg
-      initial_time: 0 s             # optional, default 0 s
-      livetime_fraction: 1.0        # optional, default 1.0
-      observation_strategy: {type: ZenithPointing}
-    ```
-
-    The second form is an extension beyond the plan's Section 7 sketch,
-    which shows only a path. A capstone that cannot express an orbit would
-    be a thin capstone: `SpacecraftHistory.from_elliptical_orbit` is what
-    the notebooks actually use, and it needs an observation strategy the
-    sketch has nowhere to put.
-
-    Parameters
-    ----------
-    config : str or mapping
-        The `spacecraft_history` entry.
-    where : str
-        Label for this entry in error messages.
-    earth : `Earth` or None
-        The Earth the history is validated against (`orbit_radius >
-        earth.radius`) and that a `TargetedPointing` strategy points
-        around. `None` falls back to `SpacecraftHistory`'s own default.
-    base_dir : `pathlib.Path` or None
-        The directory a relative `.ori` path is taken relative to -- the
-        directory of the configuration file, when there was one. `None`
-        (the default, and what a configuration handed in as a mapping
-        gets) leaves a relative path resolving against the working
-        directory. An absolute path is unaffected either way.
-
-    Returns
-    -------
-    `SpacecraftHistory`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key, a missing required key, a bad quantity,
-        or anything `SpacecraftHistory` itself rejects (a perigee inside
-        the Earth, a non-positive duration, a malformed `.ori` file).
-    FileNotFoundError
-        If the named `.ori` file does not exist.
-    """
-
-    return _spacecraft_history_from_config(config, where, earth, base_dir)[0]
-
-
-def _spacecraft_history_from_config(config, where, earth, base_dir = None):
-    """
-    Build a `SpacecraftHistory` and the canonical block describing it.
-
-    A generated `SpacecraftHistory` keeps only its sampled rows, not the
-    Kepler elements that produced them, and one read from a file does not
-    remember the file. Neither can be recovered from the object, so the
-    canonical block is built here, where both are still in hand, and the
-    simulator keeps it for `simulator_to_config`.
-
-    Parameters
-    ----------
-    config : str or mapping
-        The `spacecraft_history` entry.
-    where : str
-        Label for this entry in error messages.
-    earth : `Earth` or None
-        The Earth to validate against and to hand to a `TargetedPointing`.
-    base_dir : `pathlib.Path` or None
-        The directory a relative `.ori` path resolves against. See
-        `spacecraft_history_from_config`.
-
-    Returns
-    -------
-    history : `SpacecraftHistory`
-        The history.
-    block : str or dict
-        The canonical configuration entry describing it. A path is the
-        string the configuration wrote, never the resolved one: writing
-        the resolved path back out would turn a portable configuration
-        into a machine-specific one.
-
-    Raises
-    ------
-    ValueError
-        See `spacecraft_history_from_config`.
-    """
-
-    if isinstance(config, str):
-        path = _resolve_path(config, base_dir)
-        try:
-            history = SpacecraftHistory.open(path, earth = earth)
-        except FileNotFoundError as err:
-            # As for a Tabulated scaling's 'file': the type is kept, only
-            # the message gains the key that asked for the path and the
-            # directory it was looked for in.
-            raise FileNotFoundError(
-                f"{where} = {config!r} does not exist "
-                f"(looked in {_searched_dir(path)}).") from err
-        except Exception as err:
-            raise ValueError(
-                f"{where}: could not read the spacecraft history from "
-                f"{config!r} ({type(err).__name__}: {err}).") from err
-
-        return history, config
-
-    block = _as_mapping(config, where)
-
-    _type_name(block, where, _HISTORY_TYPES, 'spacecraft history')
-
-    allowed = ('type', 'eccentricity', 'livetime_fraction',
-               'observation_strategy') + tuple(_ORBIT_QUANTITIES)
-    _check_keys(block, where, allowed, required = ('semi_major_axis',))
-
-    kwargs = {}
-    canonical = {'type': 'elliptical_orbit'}
-
-    for key, (unit, minimum) in _ORBIT_QUANTITIES.items():
-        value = _quantity(block, key, where, unit, minimum = minimum,
-                          required = (key == 'semi_major_axis'))
-        if value is not None:
-            kwargs[key] = value
-            canonical[key] = _format_quantity(value)
-
-    for key, maximum in (('eccentricity', None), ('livetime_fraction', 1.0)):
-        value = _number(block, key, where, minimum = 0, maximum = maximum)
-        if value is not None:
-            kwargs[key] = value
-            canonical[key] = value
-
-    if 'observation_strategy' in block:
-        strategy = ObservationStrategy.from_config(
-            block['observation_strategy'], f"{where}.observation_strategy", earth)
-        kwargs['observation_strategy'] = strategy
-        canonical['observation_strategy'] = strategy.to_config()
-
-    try:
-        history = SpacecraftHistory.from_elliptical_orbit(earth = earth, **kwargs)
-    except Exception as err:
-        raise ValueError(
-            f"{where}: could not generate the orbit "
-            f"({type(err).__name__}: {err}).") from err
-
-    return history, canonical
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +413,7 @@ def simulator_from_config(cls, config, inertial):
     history_block = None
 
     if inertial:
-        history, history_block = _spacecraft_history_from_config(
+        history, history_block = SpacecraftHistory._from_config_and_block(
             block['spacecraft_history'], f"{where}.spacecraft_history", earth,
             base_dir)
         kwargs['spacecraft_history'] = history

@@ -138,7 +138,7 @@ class InertialSimulator(SimulatorBase):
 
         The `spacecraft_history` entry is required, and is either a path to
         a `.ori` file or a block describing an orbit to generate (see
-        `gammaraytoys.sims.config.spacecraft_history_from_config`). The
+        `SpacecraftHistory.from_config`). The
         single `earth` block is wired into the history, into any
         `TargetedPointing` strategy and into any `EarthAlbedoSource`, so a
         configuration cannot produce a run with two different planets.
