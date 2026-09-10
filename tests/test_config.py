@@ -29,7 +29,7 @@ from gammaraytoys.sims import (
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
     Source, SourceScaling, SpinPointing, Simulator, Spectrum,
     TabulatedScaling, TargetedPointing, ZenithPointing,
-    detector_from_config, detector_to_config, earth_from_config, earth_to_config,
+    detector_from_config, detector_to_config,
     load_config, reconstructor_from_config, reconstructor_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
@@ -666,32 +666,32 @@ def test_detector_unknown_type_raises():
 
 
 def test_earth_round_trips():
-    earth = earth_from_config(EARTH_BLOCK)
+    earth = Earth.from_config(EARTH_BLOCK)
     assert earth.radius == 6371 * u.km
 
-    out = earth_to_config(earth)
+    out = earth.to_config()
     assert u.Quantity(out['radius']) == 6371 * u.km
 
-    earth2 = earth_from_config(out)
-    assert earth_to_config(earth2) == out
+    earth2 = Earth.from_config(out)
+    assert earth2.to_config() == out
 
 
 def test_earth_default_radius_is_astropy_r_earth_not_the_plans_6371():
     # module docstring: an empty `earth` block gives astropy's nominal
     # R_earth (6378.1 km), *not* the 6371 km the plan's own sketch uses.
-    earth = earth_from_config({})
+    earth = Earth.from_config({})
     assert earth.radius == R_earth.to(u.km)
     assert earth.radius != 6371 * u.km
 
 
 def test_earth_unknown_key_raises():
     with pytest.raises(ValueError, match='bogus'):
-        earth_from_config({'radius': '6371 km', 'bogus': 1})
+        Earth.from_config({'radius': '6371 km', 'bogus': 1})
 
 
 def test_earth_nonpositive_radius_raises():
     with pytest.raises(ValueError, match='positive'):
-        earth_from_config({'radius': '-1 km'})
+        Earth.from_config({'radius': '-1 km'})
 
 
 def test_reconstructor_round_trips():
@@ -1494,7 +1494,7 @@ def test_a_missing_spacecraft_history_file_names_the_key():
 
 def test_a_mistyped_key_is_suggested():
     with pytest.raises(ValueError, match="Did you mean 'radius'") as caught:
-        earth_from_config({'radious': '6371 km'})
+        Earth.from_config({'radious': '6371 km'})
 
     assert 'radious' in str(caught.value)
 

@@ -158,7 +158,6 @@ from .spacecraft_history import SpacecraftHistory
 
 __all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
-           'earth_from_config', 'earth_to_config',
            'reconstructor_from_config', 'reconstructor_to_config',
            'spacecraft_history_from_config',
            'simulator_from_config', 'simulator_to_config']
@@ -358,65 +357,6 @@ def detector_to_config(detector):
             'energy_resolution': (float(resolution) if np.ndim(resolution) == 0
                                   else [float(item) for item in resolution]),
             'energy_threshold': _format_quantity(_collapse(detector.energy_threshold))}
-
-
-def earth_from_config(config, where = 'earth'):
-    """
-    Build an `Earth` from its configuration block.
-
-    ```yaml
-    radius: 6371 km
-    ```
-
-    Parameters
-    ----------
-    config : mapping
-        The `earth` block. An empty block is legal and gives the default
-        `Earth()` -- astropy's nominal `R_earth`, which is 6378.1 km, not
-        the 6371 km the plan's own sketch uses. Write the radius out.
-    where : str
-        Label for this block in error messages.
-
-    Returns
-    -------
-    `Earth`
-
-    Raises
-    ------
-    ValueError
-        On an unknown key, or a radius that is not a positive length.
-    """
-
-    block = _as_mapping(config, where)
-    _check_keys(block, where, ('radius',))
-
-    radius = _quantity(block, 'radius', where, u.km)
-
-    if radius is not None and radius <= 0 * radius.unit:
-        raise ValueError(f"{where}: key 'radius' must be positive, got {radius}.")
-
-    return Earth(radius = radius)
-
-
-def earth_to_config(earth):
-    """
-    Write an `Earth` back out as a configuration block.
-
-    Parameters
-    ----------
-    earth : `Earth`
-        The Earth to describe.
-
-    Returns
-    -------
-    dict
-        `{'radius': ...}`. The radius is always written, including when the
-        configuration that built this Earth left it out: which planet a run
-        used is exactly the thing this project has already shipped a silent
-        disagreement about.
-    """
-
-    return {'radius': _format_quantity(earth.radius)}
 
 
 # ---------------------------------------------------------------------------
@@ -821,7 +761,7 @@ def simulator_from_config(cls, config, inertial):
     # The Earth first: it is shared by the history, by TargetedPointing and
     # by EarthAlbedoSource, and every one of them must get *this* one. A run
     # with two different planets is a bug this project has shipped before.
-    earth = (earth_from_config(block['earth'], f"{where}.earth")
+    earth = (Earth.from_config(block['earth'], f"{where}.earth")
              if 'earth' in block else Earth())
 
     detector = detector_from_config(block['detector'], f"{where}.detector")
@@ -912,7 +852,7 @@ def simulator_to_config(simulator):
         earth = simulator._config_earth
 
     if earth is not None:
-        config['earth'] = earth_to_config(earth)
+        config['earth'] = earth.to_config()
 
     config['reconstructor'] = reconstructor_to_config(simulator.reconstructor)
 
