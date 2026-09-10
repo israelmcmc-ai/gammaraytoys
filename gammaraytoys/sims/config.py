@@ -2015,18 +2015,34 @@ def source_from_config(config, where = 'source', earth = None):
         if kwargs['flux'] is None and kwargs['flux_pivot'] is not None:
             spectrum = kwargs['spectrum']
             pivot_energy = kwargs['pivot_energy']
-            resolved_flux = (kwargs['flux_pivot'] / spectrum.pdf(pivot_energy)).to(u.Unit('1 / (cm s)'))
+            pivot_density = spectrum.pdf(pivot_energy)
+            zero_density_error = ValueError(
+                f"{where}: key 'pivot_energy' = {pivot_energy} has zero "
+                f"probability density on this spectrum, so there is no "
+                f"total flux that 'flux_pivot' could correspond to. The "
+                f"spectrum's energy range is "
+                f"[{spectrum.min_energy}, {spectrum.max_energy}]; "
+                f"'pivot_energy' ordinarily needs to fall inside it "
+                f"(a `MultiComponentSpectrum` can still have zero "
+                f"density inside its overall range, in a gap none of "
+                f"its components cover).")
+
+            # Check the density itself before dividing by it, rather than
+            # dividing and then checking whether the result came out
+            # infinite: a zero density is exactly the condition being
+            # guarded against, and dividing by it first only earns a numpy
+            # RuntimeWarning on the way to the same error raised here.
+            if pivot_density == 0:
+                raise zero_density_error
+
+            resolved_flux = (kwargs['flux_pivot'] / pivot_density).to(u.Unit('1 / (cm s)'))
+
+            # Belt and braces: the zero-density check above is the only way
+            # this division was going wrong, but keep this in case some
+            # other route (a denormal density, say) still produces a
+            # non-finite flux.
             if not np.isfinite(resolved_flux):
-                raise ValueError(
-                    f"{where}: key 'pivot_energy' = {pivot_energy} has zero "
-                    f"probability density on this spectrum, so there is no "
-                    f"total flux that 'flux_pivot' could correspond to. The "
-                    f"spectrum's energy range is "
-                    f"[{spectrum.min_energy}, {spectrum.max_energy}]; "
-                    f"'pivot_energy' ordinarily needs to fall inside it "
-                    f"(a `MultiComponentSpectrum` can still have zero "
-                    f"density inside its overall range, in a gap none of "
-                    f"its components cover).")
+                raise zero_density_error
 
         source_class = PointSource
 
