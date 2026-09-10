@@ -24,13 +24,13 @@ from astropy.constants import R_earth
 from gammaraytoys.sims import (
     ConstantScaling, Earth, EarthAlbedoSource, ExtendedSource,
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
-    MultiComponentSpectrum, NadirPointing, NearPointSource, PointSource,
+    MultiComponentSpectrum, NadirPointing, NearPointSource, ObservationStrategy,
+    PointSource,
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
     Source, SourceScaling, SpinPointing, Simulator, Spectrum,
     TabulatedScaling, TargetedPointing, ZenithPointing,
     detector_from_config, detector_to_config, earth_from_config, earth_to_config,
-    load_config, observation_strategy_from_config, observation_strategy_to_config,
-    reconstructor_from_config, reconstructor_to_config,
+    load_config, reconstructor_from_config, reconstructor_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
 # do on every astropy this project supports: parsing a bracketed list out of a
@@ -564,66 +564,66 @@ def test_source_missing_spectrum_raises():
 # ===========================================================================
 
 def test_zenith_pointing_round_trips():
-    strategy = observation_strategy_from_config({'type': 'ZenithPointing'})
+    strategy = ObservationStrategy.from_config({'type': 'ZenithPointing'})
     assert isinstance(strategy, ZenithPointing)
-    assert observation_strategy_to_config(strategy) == {'type': 'ZenithPointing'}
+    assert strategy.to_config() == {'type': 'ZenithPointing'}
 
 
 def test_nadir_pointing_round_trips():
-    strategy = observation_strategy_from_config({'type': 'NadirPointing'})
+    strategy = ObservationStrategy.from_config({'type': 'NadirPointing'})
     assert isinstance(strategy, NadirPointing)
-    assert observation_strategy_to_config(strategy) == {'type': 'NadirPointing'}
+    assert strategy.to_config() == {'type': 'NadirPointing'}
 
 
 def test_inertial_pointing_round_trips():
-    strategy = observation_strategy_from_config({'type': 'InertialPointing', 'attitude': '30 deg'})
+    strategy = ObservationStrategy.from_config({'type': 'InertialPointing', 'attitude': '30 deg'})
     assert isinstance(strategy, InertialPointing)
     assert strategy.attitude == 30 * u.deg
 
-    out = observation_strategy_to_config(strategy)
+    out = strategy.to_config()
     assert u.Quantity(out['attitude']) == 30 * u.deg
 
 
 def test_spin_pointing_round_trips_default_initial_attitude_omitted():
-    strategy = observation_strategy_from_config({'type': 'SpinPointing', 'rate': '0.1 deg/s'})
+    strategy = ObservationStrategy.from_config({'type': 'SpinPointing', 'rate': '0.1 deg/s'})
     assert isinstance(strategy, SpinPointing)
     assert strategy.initial_attitude == 0 * u.deg
 
-    out = observation_strategy_to_config(strategy)
+    out = strategy.to_config()
     assert 'initial_attitude' not in out
 
 
 def test_spin_pointing_round_trips_explicit_initial_attitude():
-    strategy = observation_strategy_from_config(
+    strategy = ObservationStrategy.from_config(
         {'type': 'SpinPointing', 'rate': '0.1 deg/s', 'initial_attitude': '15 deg'})
-    out = observation_strategy_to_config(strategy)
+    out = strategy.to_config()
     assert u.Quantity(out['initial_attitude']) == 15 * u.deg
 
 
 def test_targeted_pointing_round_trips_with_earth():
-    strategy = observation_strategy_from_config(
+    strategy = ObservationStrategy.from_config(
         {'type': 'TargetedPointing', 'sky_angle': '45 deg'}, earth=EARTH)
     assert isinstance(strategy, TargetedPointing)
     assert strategy.sky_angle == 45 * u.deg
     assert strategy.earth is EARTH
 
-    out = observation_strategy_to_config(strategy)
+    out = strategy.to_config()
     assert u.Quantity(out['sky_angle']) == 45 * u.deg
 
 
 def test_targeted_pointing_without_earth_raises():
     with pytest.raises(ValueError, match='Earth'):
-        observation_strategy_from_config({'type': 'TargetedPointing', 'sky_angle': '45 deg'})
+        ObservationStrategy.from_config({'type': 'TargetedPointing', 'sky_angle': '45 deg'})
 
 
 def test_observation_strategy_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown observation strategy type'):
-        observation_strategy_from_config({'type': 'SlewPointing'})
+        ObservationStrategy.from_config({'type': 'SlewPointing'})
 
 
 def test_observation_strategy_unknown_key_raises():
     with pytest.raises(ValueError, match='bogus'):
-        observation_strategy_from_config({'type': 'ZenithPointing', 'bogus': 1})
+        ObservationStrategy.from_config({'type': 'ZenithPointing', 'bogus': 1})
 
 
 # ===========================================================================

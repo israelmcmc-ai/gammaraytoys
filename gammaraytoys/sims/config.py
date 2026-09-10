@@ -150,8 +150,7 @@ from .config_utils import (_as_mapping, _boolean, _check_keys, _collapse,
                            _format_quantity, _integer, _number, _quantity,
                            _resolve_path, _searched_dir, _text, _type_name)
 from .earth import Earth
-from .observation_strategy import (ZenithPointing, NadirPointing, InertialPointing,
-                                   SpinPointing, TargetedPointing)
+from .observation_strategy import ObservationStrategy
 from .reco import SimpleTraditionalReconstructor
 from .source import Source
 from .spacecraft_history import SpacecraftHistory
@@ -160,7 +159,6 @@ from .spacecraft_history import SpacecraftHistory
 __all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
            'earth_from_config', 'earth_to_config',
-           'observation_strategy_from_config', 'observation_strategy_to_config',
            'reconstructor_from_config', 'reconstructor_to_config',
            'spacecraft_history_from_config',
            'simulator_from_config', 'simulator_to_config']
@@ -426,141 +424,6 @@ def earth_to_config(earth):
 # ---------------------------------------------------------------------------
 
 
-#: Accepted spellings of every observation strategy type.
-_STRATEGY_TYPES = {'ZenithPointing': 'ZenithPointing',
-                   'NadirPointing': 'NadirPointing',
-                   'InertialPointing': 'InertialPointing',
-                   'SpinPointing': 'SpinPointing',
-                   'TargetedPointing': 'TargetedPointing'}
-
-
-def observation_strategy_from_config(config, where = 'observation_strategy',
-                                     earth = None):
-    """
-    Build an `ObservationStrategy` from its configuration block.
-
-    ```yaml
-    {type: ZenithPointing}
-    {type: NadirPointing}
-    {type: InertialPointing, attitude: 30 deg}
-    {type: SpinPointing, rate: 0.1 deg/s, initial_attitude: 0 deg}
-    {type: TargetedPointing, sky_angle: 45 deg}
-    ```
-
-    Parameters
-    ----------
-    config : mapping
-        The `observation_strategy` block.
-    where : str
-        Label for this block in error messages.
-    earth : `Earth` or None
-        The Earth a `TargetedPointing` decides occultation against.
-        Required for that strategy and refused as `None`: it is the one
-        strategy whose whole job is deciding when the target is behind the
-        Earth, and letting it build its own would be exactly the
-        two-different-planets bug this codebase has already shipped once.
-
-    Returns
-    -------
-    `ObservationStrategy`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key, a missing required key, a bad quantity,
-        or a `TargetedPointing` with no Earth to point around.
-    """
-
-    block = _as_mapping(config, where)
-    name = _type_name(block, where, _STRATEGY_TYPES, 'observation strategy')
-
-    if name == 'ZenithPointing':
-        _check_keys(block, where, ('type',))
-        return ZenithPointing()
-
-    if name == 'NadirPointing':
-        _check_keys(block, where, ('type',))
-        return NadirPointing()
-
-    if name == 'InertialPointing':
-        _check_keys(block, where, ('type', 'attitude'), required = ('attitude',))
-        return InertialPointing(
-            attitude = _quantity(block, 'attitude', where, u.deg, required = True))
-
-    if name == 'SpinPointing':
-        _check_keys(block, where, ('type', 'rate', 'initial_attitude'),
-                    required = ('rate',))
-        return SpinPointing(
-            rate = _quantity(block, 'rate', where, u.deg / u.s, required = True),
-            initial_attitude = _quantity(block, 'initial_attitude', where, u.deg,
-                                         default = 0 * u.deg))
-
-    _check_keys(block, where, ('type', 'sky_angle'), required = ('sky_angle',))
-
-    if earth is None:
-        raise ValueError(
-            f"{where}: a TargetedPointing needs the Earth it decides "
-            f"occultation against, and must not build its own -- pass the "
-            f"run's Earth (the top-level loader always does).")
-
-    return TargetedPointing(
-        sky_angle = _quantity(block, 'sky_angle', where, u.deg, required = True),
-        earth = earth)
-
-
-def observation_strategy_to_config(strategy):
-    """
-    Write an `ObservationStrategy` back out as a configuration block.
-
-    Parameters
-    ----------
-    strategy : `ObservationStrategy`
-        The strategy to describe.
-
-    Returns
-    -------
-    dict
-        A block `observation_strategy_from_config` reads back into an equal
-        strategy. A `TargetedPointing`'s Earth is not written here: a
-        configuration has exactly one `earth` block, and the loader hands
-        it to this strategy.
-
-    Raises
-    ------
-    ValueError
-        If `strategy` is not one of the five types a configuration can
-        name.
-    """
-
-    if isinstance(strategy, ZenithPointing):
-        return {'type': 'ZenithPointing'}
-
-    if isinstance(strategy, NadirPointing):
-        return {'type': 'NadirPointing'}
-
-    if isinstance(strategy, InertialPointing):
-        return {'type': 'InertialPointing',
-                'attitude': _format_quantity(strategy.attitude)}
-
-    if isinstance(strategy, SpinPointing):
-        block = {'type': 'SpinPointing',
-                 'rate': _format_quantity(strategy.rate)}
-
-        if strategy.initial_attitude != 0 * u.deg:
-            block['initial_attitude'] = _format_quantity(strategy.initial_attitude)
-
-        return block
-
-    if isinstance(strategy, TargetedPointing):
-        return {'type': 'TargetedPointing',
-                'sky_angle': _format_quantity(strategy.sky_angle)}
-
-    raise ValueError(
-        f"{type(strategy).__name__} is not an observation strategy a "
-        f"configuration can describe; the types that are: "
-        f"{sorted(set(_STRATEGY_TYPES.values()))}.")
-
-
 #: Accepted spellings of every generated-orbit type.
 _HISTORY_TYPES = {'elliptical_orbit': 'elliptical_orbit'}
 
@@ -724,10 +587,10 @@ def _spacecraft_history_from_config(config, where, earth, base_dir = None):
             canonical[key] = value
 
     if 'observation_strategy' in block:
-        strategy = observation_strategy_from_config(
+        strategy = ObservationStrategy.from_config(
             block['observation_strategy'], f"{where}.observation_strategy", earth)
         kwargs['observation_strategy'] = strategy
-        canonical['observation_strategy'] = observation_strategy_to_config(strategy)
+        canonical['observation_strategy'] = strategy.to_config()
 
     try:
         history = SpacecraftHistory.from_elliptical_orbit(earth = earth, **kwargs)
