@@ -159,13 +159,11 @@ REJECTED = [
     '().__class__.__bases__[0]',
     # A dunder reached through a whitelisted callable.
     'min.__self__',
-    # Arithmetic denial of service: no dunder, no call, no name -- just a
-    # number with more digits than there is memory.
-    '9**9**9**9',
-    '10**1000',
-    # Chained '**' that is not itself huge: the rule is structural, so it
-    # does not depend on guessing how big the result would be.
-    '2**t**2',
+    # Arithmetic denial of service used to be listed here, as `9**9**9**9`
+    # and `10**1000`. It is no longer refused at *construction*: `**` is
+    # rewritten to a float-only power (`config._pow`), so those expressions
+    # are built without complaint and overflow in microseconds when they are
+    # evaluated. They belong in a test of evaluation, not of the whitelist.
     # Building and calling new code.
     '(lambda: 1)()',
     'lambda: 1',
@@ -349,70 +347,41 @@ def test_a_configured_function_scaling_evaluates_the_expression():
 
 
 # ===========================================================================
-# Part C -- the exponent rule, pinned at its boundary
+# Part C -- `**` is float-only
 # ===========================================================================
 #
-# This rule is subtle and was got wrong once during implementation: a first
-# version rejected anything whose exponent was not a small literal, which
-# throws out `2**t` -- an ordinary exponential. CONTRACT.md settles it as two
-# structural rules:
+# There used to be two structural rules here -- "an exponent may not itself be
+# a `**`" and "an integer literal exponent may not exceed 64" -- and a test
+# sitting just inside and just outside each of them. Both rules are gone, and
+# so are those tests, because the rules did not work: all the growth in
+# `(2**64)**64` is on the LEFT, so neither rule ever looked at it, and every
+# tighter shape rule was beaten in turn by putting a `*1` in the way.
 #
-#   * reject a `**` whose RIGHT operand is itself a `**` (chained
-#     exponentiation, which is what `9**9**9**9` is);
-#   * reject an integer LITERAL exponent above 64.
+# `**` is now rewritten to a float-only power (`config._pow`) before the
+# expression is compiled, so there is no boundary left to pin: an integer
+# exponent cannot produce an arbitrary-precision integer at all. What is left
+# to check here is that ordinary powers still give ordinary answers.
 #
-# Each test below sits deliberately just inside or just outside one of those
-# two lines, so that a future "simplification" of the rule breaks a test
-# rather than either re-opening the hang or breaking legitimate configs.
+# NOTE for whoever owns these tests: the denial-of-service expressions
+# (`9**9**9**9`, `10**1000`, and left-nested towers such as
+# `(((2**64)**64)**64)**64`) are now refused when the expression is
+# EVALUATED, not when it is built, and there is no test of that yet.
 
-def test_literal_exponent_at_the_limit_is_accepted():
-    # 2**64 is the largest literal exponent CONTRACT.md says must be accepted:
-    # 18446744073709551616, a number Python computes instantly.
+def test_a_big_literal_exponent_is_accepted():
+    # 2**64 used to be the largest exponent the old literal rule allowed. It
+    # is still accepted -- as 1.8446744073709552e19, a float, which is what a
+    # unitless scaling multiplier is anyway.
     assert TimeExpression('2**64')(0 * u.s) == pytest.approx(2.0**64)
 
 
-def test_literal_exponent_one_past_the_limit_is_rejected():
-    # One step outside the same line. 2**65 is no more expensive than 2**64 --
-    # the point is that the limit is where the documented limit says it is,
-    # not somewhere else that happens to work today.
-    error = _reject_promptly('2**65')
-    assert '64' in str(error)
-
-
 def test_a_non_literal_exponent_is_accepted_however_large_it_could_get():
-    # The case the first implementation got wrong. `2**t` is an ordinary
-    # exponential; the literal rule must not reach it, even though `t` at run
-    # time can be far larger than 64.
+    # `2**t` is an ordinary exponential, and `t` at run time can be far larger
+    # than any literal anyone would write.
     assert TimeExpression('2**t')(10 * u.s) == pytest.approx(1024.0)
     assert TimeExpression('t**2')(10 * u.s) == pytest.approx(100.0)
     assert TimeExpression('t**0.5')(16 * u.s) == pytest.approx(4.0)
 
 
-def test_a_float_literal_exponent_is_not_caught_by_the_integer_rule():
-    # The literal rule is about *integer* literals, because those are what
-    # produce arbitrary-precision integers. A float exponent produces a float,
-    # which overflows to inf rather than eating the machine's memory.
+def test_a_float_literal_exponent_is_accepted():
     assert TimeExpression('2**10.0')(0 * u.s) == pytest.approx(1024.0)
 
-
-def test_chained_exponentiation_is_rejected_even_when_it_is_small():
-    # `2**t**2` is `2**(t**2)`: nothing here is huge, and at t = 2 it is only
-    # 16. It is rejected anyway, because the rule is about the SHAPE of the
-    # expression. A rule that tried to decide how big the result would be
-    # would have to evaluate it, which is the thing being prevented.
-    _reject_promptly('2**t**2')
-
-
-def test_a_left_nested_power_is_not_chained_exponentiation():
-    # Just outside the other line, on the safe side: `**` is right
-    # associative, so parenthesising to the left is a different expression
-    # entirely. (2**3)**4 is 4096, computed in one step, and is fine.
-    assert TimeExpression('(2**3)**4')(0 * u.s) == pytest.approx(4096.0)
-
-
-def test_the_two_exponent_rules_are_independent():
-    # `10**1000` has no chaining, and `9**9**9**9`'s outermost exponent is a
-    # `**` rather than an oversized literal. Neither rule catches both, so
-    # dropping either one re-opens a hole.
-    _reject_promptly('10**1000')
-    _reject_promptly('9**9**9**9')

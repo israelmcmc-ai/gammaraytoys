@@ -807,8 +807,10 @@ _EXPRESSION_BINARY_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
 #: Unary operators an expression may use.
 _EXPRESSION_UNARY_OPS = (ast.UAdd, ast.USub)
 
-#: Largest integer *literal* allowed as an exponent. See `TimeExpression`.
-_MAX_LITERAL_EXPONENT = 64
+#: The name `_pow` is called under inside a rewritten expression. It is
+#: deliberately *not* in `_EXPRESSION_NAMESPACE`, so an expression that
+#: writes it itself is rejected by the whitelist, long before the rewrite.
+_POW_NAME = '_pow'
 
 
 def _reject(expression, reason):
@@ -886,9 +888,6 @@ def _check_expression_node(node, expression):
             _reject(expression,
                     f"the operator {type(node.op).__name__} is not allowed.")
 
-        if isinstance(node.op, ast.Pow):
-            _check_exponent(node.right, expression)
-
         _check_expression_node(node.left, expression)
         _check_expression_node(node.right, expression)
 
@@ -902,7 +901,9 @@ def _check_expression_node(node, expression):
         if not isinstance(node.func, ast.Name):
             _reject(expression, "only a plain function name may be called.")
         if node.func.id not in _EXPRESSION_FUNCTIONS:
-            _reject(expression, f"{node.func.id!r} is not a callable function.")
+            _reject(expression,
+                    f"{node.func.id!r} is not a callable function."
+                    f"{_suggest(node.func.id, _EXPRESSION_FUNCTIONS)}")
         if node.keywords:
             _reject(expression, "keyword arguments are not allowed in a call.")
         for argument in node.args:
@@ -928,52 +929,89 @@ def _check_expression_node(node, expression):
                 f"{type(node).__name__} expressions are not allowed.")
 
 
-def _check_exponent(node, expression):
+def _pow(base, exponent):
     """
-    Check the right operand of a `**` against the two arithmetic-DoS rules.
+    Raise `base` to `exponent` in floating point, never in integers.
 
-    `9**9**9**9` contains no dunder, calls nothing and reads nothing: it is
-    pure arithmetic that hangs the process building an integer with more
-    digits than there is memory. Two rules stop that without rejecting
-    anything legitimate:
+    Every `**` in a configuration expression is rewritten into a call to
+    this function (see `_FloatPower`), so this is the *only* exponentiation
+    a configuration file can reach.
 
-    - the exponent may not itself be a `**` (Python's `**` is
-      right-associative, so `9**9**9**9` is `9 ** (9 ** (9 ** 9))` and this
-      catches it at the outermost operator);
-    - an integer *literal* exponent may not exceed
-      `_MAX_LITERAL_EXPONENT`.
-
-    That accepts `2**t`, `t**2`, `t**0.5`, `exp(-t/3600)` and `2**64`, and
-    rejects `9**9**9**9` and `10**1000`. The literal rule deliberately does
-    not extend to non-literal exponents: `2**t` is an ordinary exponential
-    and a rule of "the exponent must be a literal <= 64" would reject it.
+    Why floats: Python's integers are arbitrary-precision, so `2**64` is an
+    exact 65-bit integer, `(2**64)**64` an exact 4097-bit one, and every
+    further nesting *squares* the number of digits. Four or five levels of
+    that -- `(((2**64)**64)**64)**64`, which is one short line in a YAML
+    file -- spend minutes of CPU and gigabytes of memory building a number
+    the run then multiplies by zero and throws away. A float cannot do
+    that: it is 64 bits wide however hard you push it, so the same
+    expression overflows to `inf`, or raises `OverflowError`, in
+    microseconds. Nothing legitimate is lost, because a scaling is a
+    unitless multiplier and therefore a float in the end anyway.
 
     Parameters
     ----------
-    node : `ast.AST`
-        The right operand of a `**`.
-    expression : str
-        The whole expression, for error messages.
+    base, exponent : float
+        The operands. Converted with `float` before the power is taken, so
+        that an integer written in the file cannot bring arbitrary
+        precision back in through the side door.
+
+    Returns
+    -------
+    float
 
     Raises
     ------
-    ValueError
-        If the exponent is another `**`, or an integer literal above
-        `_MAX_LITERAL_EXPONENT`.
+    OverflowError
+        If the result is too large for a float. `TimeExpression.__call__`
+        catches it along with every other arithmetic failure and re-raises
+        a `ValueError` naming the expression and the time.
     """
 
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
-        _reject(expression,
-                "one '**' may not be raised to another ('a**b**c'): it is pure "
-                "arithmetic that can hang the process building a number with "
-                "more digits than there is memory.")
+    return float(base) ** float(exponent)
 
-    if (isinstance(node, ast.Constant) and isinstance(node.value, int)
-            and not isinstance(node.value, bool)
-            and node.value > _MAX_LITERAL_EXPONENT):
-        _reject(expression,
-                f"an integer exponent written as a literal may not exceed "
-                f"{_MAX_LITERAL_EXPONENT}; got {node.value}.")
+
+class _FloatPower(ast.NodeTransformer):
+    """
+    Rewrite every `**` in a checked expression into a `_pow(...)` call.
+
+    Run this after `_check_expression_node` and, crucially, **before**
+    `compile`: CPython folds constant arithmetic at compile time, so a
+    literal `2**64` left in the tree would be evaluated inside `compile`
+    itself and the defence would be worth nothing.
+
+    A rewrite rather than one more rule about the shape of the tree,
+    because the shape rules kept losing. "An exponent may not itself be a
+    `**`" catches `9**9**9**9` but not `(2**64)**64`, where all of the
+    growth is on the *left*. Adding "nor may the base be one" does not
+    catch `((2**64*1)**64*1)**64` either, which breaks the pattern with a
+    harmless `*1`. There is no end to that game, so stop playing it and
+    take away the thing being attacked: the arbitrary-precision integer.
+    """
+
+    def visit_BinOp(self, node):
+        """
+        Parameters
+        ----------
+        node : `ast.BinOp`
+            A binary operation, already checked against the whitelist.
+
+        Returns
+        -------
+        `ast.AST`
+            `node` itself, unless it is a `**`, in which case the
+            equivalent call to `_pow`.
+        """
+
+        # Operands first, so that a `**` nested inside this one is
+        # rewritten too, however deep it is.
+        self.generic_visit(node)
+
+        if not isinstance(node.op, ast.Pow):
+            return node
+
+        return ast.Call(func = ast.Name(id = _POW_NAME, ctx = ast.Load()),
+                        args = [node.left, node.right],
+                        keywords = [])
 
 
 class TimeExpression:
@@ -994,7 +1032,8 @@ class TimeExpression:
     through it with no `__` anywhere:
 
     - `9**9**9**9` hangs the process. Pure arithmetic; there is no string
-      to match on.
+      to match on, and no node type to forbid either -- every node in it
+      is one an ordinary expression needs.
     - `(lambda: 1)()` is allowed. A lambda body is evaluated in the same
       restricted namespace, but the shape of the attack -- building and
       calling new code -- has no business here.
@@ -1003,19 +1042,30 @@ class TimeExpression:
       accident of which objects the namespace happens to hold, not a
       property of the defence.
 
-    So the defence here is an **AST whitelist**. The expression is parsed
-    with `ast.parse(..., mode='eval')` and every node is checked against an
-    explicit list (`_check_expression_node`): numbers, names that resolve
-    in the namespace, the arithmetic operators, and calls to whitelisted
-    functions by name. `ast.Attribute` and `ast.Lambda` are rejected
-    outright, chained `**` and oversized literal exponents are rejected by
-    `_check_exponent`, and any node type not on the list -- including
-    syntax that does not exist yet -- is rejected by default. The `__`
-    string check is kept as well, as belt and braces; it is not the
-    defence.
+    So the defence here is two things. The first is an **AST whitelist**.
+    The expression is parsed with `ast.parse(..., mode='eval')` and every
+    node is checked against an explicit list (`_check_expression_node`):
+    numbers, names that resolve in the namespace, the arithmetic
+    operators, and calls to whitelisted functions by name. `ast.Attribute`
+    and `ast.Lambda` are rejected outright, and any node type not on the
+    list -- including syntax that does not exist yet -- is rejected by
+    default. The `__` string check is kept as well, as belt and braces; it
+    is not the defence.
 
-    Only then is the checked tree compiled and evaluated, with
-    `__builtins__` emptied.
+    That disposes of the lambda and of the attribute chain, but not of
+    `9**9**9**9`, which is made entirely of things the whitelist has to
+    allow. So the second half of the defence is a **rewrite**: once the
+    tree has been checked, `_FloatPower` turns every `**` in it into a
+    call to `_pow`, which takes the power in floating point. A float is 64
+    bits wide whatever is asked of it, so a runaway power overflows in
+    microseconds instead of filling memory with an exact integer. See
+    `_pow` for why this is done by rewriting the tree rather than by one
+    more rule about its shape.
+
+    Only then is the rewritten tree compiled and evaluated, with
+    `__builtins__` emptied. The rewrite has to come *before* the compile,
+    because the compiler folds constant arithmetic itself and would
+    happily build the huge integer on our behalf.
     """
 
     def __init__(self, expression):
@@ -1053,6 +1103,11 @@ class TimeExpression:
 
         _check_expression_node(tree, expression)
 
+        # Float-only `**` (see `_pow`), and before the compile, not after:
+        # the compiler folds constant arithmetic itself, so a `**` still in
+        # the tree here would be evaluated by `compile` below.
+        tree = ast.fix_missing_locations(_FloatPower().visit(tree))
+
         self._expression = expression
         self._code = compile(tree, '<gammaraytoys config expression>', 'eval')
 
@@ -1088,8 +1143,9 @@ class TimeExpression:
         TypeError
             If `time` is not a `Quantity` in time units.
         ValueError
-            If evaluating raises (a division by zero, a domain error, ...);
-            the message names the expression and the time.
+            If evaluating raises (a division by zero, a domain error, a
+            power that overflows a float, ...); the message names the
+            expression and the time.
         """
 
         if not isinstance(time, u.Quantity):
@@ -1099,6 +1155,10 @@ class TimeExpression:
 
         namespace = dict(_EXPRESSION_NAMESPACE)
         namespace['t'] = time.to_value(u.s)
+        # The name `_FloatPower` rewrote every `**` into. It lives here and
+        # not in `_EXPRESSION_NAMESPACE` so that the whitelist still refuses
+        # an expression that tries to call it by hand.
+        namespace[_POW_NAME] = _pow
 
         try:
             # Not a bare `eval`: `self._code` is the compiled form of a tree
