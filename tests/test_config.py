@@ -1224,3 +1224,302 @@ def test_random_seed_round_trips_through_to_config():
     simulator = Simulator.from_config(config)
     assert simulator.random_seed == 42
     assert simulator.to_config()['random_seed'] == 42
+
+
+# ===========================================================================
+# Part M -- a PointSource's normalization: one form, whole, and usable
+# ===========================================================================
+#
+# A `PointSource` is normalized either by `flux` -- a total flux -- or by the
+# pair `flux_pivot` and `pivot_energy`, a differential flux and the energy it
+# is quoted at. `PointSource` itself takes whichever it is given, quietly
+# prefers `flux`, and leaves the flux unset when the pair is half there. None
+# of that is visible from a configuration file, and all three of the ways it
+# goes wrong end the same way: a file that loads, runs, and is written back
+# out as a *different* file from the one that was read.
+
+def _power_law_block():
+    # A spectrum with a PDF, which a pivot flux needs (a monoenergetic line's
+    # PDF is a delta and refuses to be evaluated at all).
+    return {'type': 'PowerLaw', 'index': -2,
+            'min_energy': '1 MeV', 'max_energy': '10 MeV'}
+
+
+def test_flux_beside_flux_pivot_is_refused():
+    # Given both, `PointSource` uses `flux` and drops the pivot pair without
+    # saying so, and `to_config` then writes the file back out with the pivot
+    # pair gone -- a silently different file.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux': '1e-3 1/(cm s)', 'flux_pivot': '1e-6 1/(cm s keV)',
+             'pivot_energy': '1 MeV', 'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='not both'):
+        source_from_config(block)
+
+
+def test_flux_beside_pivot_energy_alone_is_refused():
+    # Half a pivot pair beside a `flux` is the same conflict: `pivot_energy`
+    # means nothing without `flux_pivot`, and would be dropped just as
+    # quietly.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux': '1e-3 1/(cm s)', 'pivot_energy': '1 MeV',
+             'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='not both'):
+        source_from_config(block)
+
+
+def test_flux_pivot_without_pivot_energy_is_refused():
+    # The two are halves of one number. Given only one, `PointSource` leaves
+    # the flux unset: the run draws from an unnormalized source and the lone
+    # key vanishes from what is written back out.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux_pivot': '1e-6 1/(cm s keV)', 'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='pivot_energy'):
+        source_from_config(block)
+
+
+def test_pivot_energy_without_flux_pivot_is_refused():
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'pivot_energy': '1 MeV', 'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='flux_pivot'):
+        source_from_config(block)
+
+
+def test_a_pointsource_with_no_normalization_at_all_is_still_allowed():
+    # "No flux" is a legitimate thing to write: such a source can be drawn
+    # from but not counted, and the module docstring says so. Only a *half*
+    # normalization is refused.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'spectrum': _power_law_block()}
+    source = source_from_config(block)
+
+    assert source.flux() is None
+
+    out = source_to_config(source)
+    assert 'flux' not in out
+    assert source_to_config(source_from_config(out)) == out
+
+
+def test_a_pivot_energy_where_the_spectrum_has_no_density_is_refused():
+    # The pivot flux is resolved by dividing by the spectrum's probability
+    # density at `pivot_energy`, and that density is exactly zero outside the
+    # spectrum's own range. The division does not fail -- it returns infinity
+    # -- so without a check the source is built with an infinite flux and
+    # `to_config` writes `flux: inf ...` back into the file as if someone had
+    # meant it. This spectrum runs from 1 to 10 MeV; 100 MeV is outside it.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '100 MeV',
+             'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='zero'):
+        source_from_config(block)
+
+
+def test_the_refusal_names_the_energy_range_the_pivot_should_have_been_in():
+    # The message has to say where the pivot could have gone, or the reader
+    # is left to work out the spectrum's range for themselves.
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '0.5 MeV',
+             'spectrum': _power_law_block()}
+
+    with pytest.raises(ValueError, match='pivot_energy') as caught:
+        source_from_config(block)
+
+    assert '1' in str(caught.value) and '10' in str(caught.value)
+
+
+def test_a_pivot_energy_inside_the_range_is_still_fine():
+    # The check must not have closed the door on the ordinary case: the same
+    # hand-computed flux as `test_pointsource_flux_pivot_form_round_trips`,
+    # at a pivot energy in the middle of the range rather than at its edge.
+    # For index -2 over [1, 10] MeV the normalization is
+    #     norm = (1 + n) / (Emax*(Emax/Emin)**n - Emin) = 10/9 per MeV,
+    # and the PDF at E is norm*(E/Emin)**n, so at E = 2 MeV it is
+    #     (10/9)*(1/4) = 10/36 per MeV.
+    # A pivot flux of 1e-6 1/(cm s keV) is 1e-3 1/(cm s MeV), so
+    #     flux = 1e-3 / (10/36) = 3.6e-3 1/(cm s).
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '2 MeV',
+             'spectrum': _power_law_block()}
+    source = source_from_config(block)
+
+    assert source.flux().to_value('1/(cm s)') == pytest.approx(3.6e-3)
+
+
+# ===========================================================================
+# Part N -- the quantities that cannot sensibly be negative are bounded
+# ===========================================================================
+#
+# Before this, `flux: "-1e-3 1/(cm s)"` loaded without a word, round-tripped
+# verbatim, and died at the first interval of the run inside numpy, with
+# `lam < 0 or lam is NaN` and not one word about which key, which source or
+# which file. The bound belongs where the file is read.
+
+def test_a_negative_point_source_flux_is_refused_naming_the_key():
+    block = {'type': 'PointSource', 'sky_angle': '0 deg',
+             'flux': '-1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match="'flux'") as caught:
+        source_from_config(block)
+
+    assert '>= 0' in str(caught.value)
+    # The offending value, so the reader can find the line.
+    assert '-1e-3 1/(cm s)' in str(caught.value)
+
+
+def test_a_negative_isotropic_flux_is_refused():
+    block = {'type': 'IsotropicSource', 'flux': '-2e-4 1/(cm s)',
+             'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match="'flux'"):
+        source_from_config(block)
+
+
+def test_a_negative_extended_source_flux_is_refused():
+    block = {'type': 'ExtendedSource', 'sky_angle': '90 deg', 'width': '5 deg',
+             'flux': '-2e-4 1/(cm s)', 'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match="'flux'"):
+        source_from_config(block)
+
+
+def test_a_negative_flux_pivot_or_pivot_energy_is_refused():
+    negative_pivot = {'type': 'PointSource', 'sky_angle': '0 deg',
+                      'flux_pivot': '-1e-6 1/(cm s keV)', 'pivot_energy': '2 MeV',
+                      'spectrum': _power_law_block()}
+    with pytest.raises(ValueError, match="'flux_pivot'"):
+        source_from_config(negative_pivot)
+
+    negative_energy = {'type': 'PointSource', 'sky_angle': '0 deg',
+                       'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '-2 MeV',
+                       'spectrum': _power_law_block()}
+    with pytest.raises(ValueError, match="'pivot_energy'"):
+        source_from_config(negative_energy)
+
+
+def test_a_negative_near_point_source_rate_is_refused():
+    block = {'type': 'NearPointSource', 'position': {'x': '0 cm', 'y': '2 cm'},
+             'rate': '-3 1/s', 'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match="'rate'"):
+        source_from_config(block)
+
+
+def test_a_zero_flux_is_still_allowed():
+    # The bound is inclusive, and it has to be: a source switched off for a
+    # run is a reasonable thing to write, and zero photons is a perfectly
+    # well-defined Poisson mean.
+    block = {'type': 'IsotropicSource', 'flux': '0 1/(cm s)',
+             'spectrum': _spectrum_block()}
+    source = source_from_config(block)
+
+    assert source.flux().to_value('1/(cm s)') == 0.0
+
+
+@pytest.mark.parametrize('key, value', [('semi_major_axis', '-6771 km'),
+                                        ('duration', '-200 s'),
+                                        ('time_step', '-50 s')])
+def test_a_negative_orbit_size_or_span_of_time_is_refused(key, value):
+    config = _minimal_inertial_config()
+    config['spacecraft_history'][key] = value
+
+    with pytest.raises(ValueError, match=f"'{key}'") as caught:
+        InertialSimulator.from_config(config)
+
+    assert '>= 0' in str(caught.value)
+
+
+@pytest.mark.parametrize('key, value', [('argument_of_periapsis', '-10 deg'),
+                                        ('initial_time', '-100 s')])
+def test_an_angle_around_the_orbit_and_an_epoch_may_still_be_negative(key, value):
+    # Both of these run backwards perfectly sensibly: an argument of periapsis
+    # measured the other way round, and a run that starts before the orbit's
+    # own zero of time. Bounding them at zero would refuse a legitimate file.
+    config = _minimal_inertial_config()
+    config['spacecraft_history'][key] = value
+
+    simulator = InertialSimulator.from_config(config)
+
+    written = simulator.to_config()['spacecraft_history']
+    assert u.Quantity(written[key]) == u.Quantity(value)
+
+
+def test_a_negative_width_keeps_extended_sources_own_better_message():
+    # `width` is deliberately NOT bounded at the configuration layer:
+    # `ExtendedSource` demands a *strictly* positive one and says what to do
+    # instead, which is more use than "must be >= 0", and the configuration
+    # layer already puts the block's name in front of it.
+    block = {'type': 'ExtendedSource', 'sky_angle': '90 deg', 'width': '-5 deg',
+             'flux': '2e-4 1/(cm s)', 'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match='PointSource') as caught:
+        source_from_config(block)
+
+    assert 'strictly positive' in str(caught.value)
+
+
+def test_a_negative_emissivity_keeps_earth_albedos_own_better_message():
+    block = {'type': 'EarthAlbedoSource', 'emissivity': '-1e-4 1/(cm s)',
+             'spectrum': _spectrum_block()}
+
+    with pytest.raises(ValueError, match='strictly positive') as caught:
+        source_from_config(block, earth=EARTH)
+
+    assert 'drop the source' in str(caught.value)
+
+
+# ===========================================================================
+# Part O -- a missing sibling file says which key named it
+# ===========================================================================
+
+def test_a_missing_scaling_file_names_the_key_and_stays_a_file_not_found():
+    # Still a `FileNotFoundError` -- "the file is missing" is a different
+    # problem from "the file is wrong" -- but a configuration with a dozen
+    # scalings in it needs to say which one.
+    with pytest.raises(FileNotFoundError) as caught:
+        scaling_from_config({'type': 'Tabulated', 'file': 'lc.csv'})
+
+    assert "key 'file' = 'lc.csv' does not exist" in str(caught.value)
+
+
+def test_a_missing_spacecraft_history_file_names_the_key():
+    config = _minimal_inertial_config()
+    config['spacecraft_history'] = 'x.ori'
+
+    with pytest.raises(FileNotFoundError) as caught:
+        InertialSimulator.from_config(config)
+
+    assert "config.spacecraft_history = 'x.ori' does not exist" in str(caught.value)
+
+
+# ===========================================================================
+# Part P -- `_suggest` still answers for keys, types and choices
+# ===========================================================================
+#
+# The function-name suggestions grew a rule of their own (see
+# `tests/test_config_expression.py`, Part H). The plain edit-distance
+# suggestion it fell out of is shared with the three messages below and was
+# left alone; these pin that it still behaves as it did.
+
+def test_a_mistyped_key_is_suggested():
+    with pytest.raises(ValueError, match="Did you mean 'radius'") as caught:
+        earth_from_config({'radious': '6371 km'})
+
+    assert 'radious' in str(caught.value)
+
+
+def test_a_mistyped_type_is_suggested():
+    with pytest.raises(ValueError, match="Did you mean 'PointSource'"):
+        source_from_config({'type': 'PointSorce', 'sky_angle': '0 deg',
+                            'flux': '1e-3 1/(cm s)',
+                            'spectrum': _spectrum_block()})
+
+
+def test_a_mistyped_choice_is_suggested():
+    with pytest.raises(ValueError, match="Did you mean 'isotropic'"):
+        source_from_config({'type': 'EarthAlbedoSource',
+                            'emissivity': '1e-4 1/(cm s)', 'law': 'isotropci',
+                            'spectrum': _spectrum_block()}, earth=EARTH)
