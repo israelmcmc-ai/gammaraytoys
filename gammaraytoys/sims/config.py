@@ -876,6 +876,48 @@ def _reject(expression, reason):
         f"calls to {sorted(_EXPRESSION_FUNCTIONS)} -- nothing else.")
 
 
+def _suggest_function(name):
+    """
+    A `did you mean ...?` fragment for a mistyped function name.
+
+    `_suggest` on its own is wrong here often enough to be worse than
+    silence. It judges by edit distance, and a short word is close to
+    everything: it answers both `min(1, t)` and `cosine(t)` with `'sin'`,
+    when `minimum` and `cos` are the names plainly meant, and a wrong
+    suggestion sends a student looking in the wrong place.
+
+    A mistyped function name is nearly always a real name cut short or run
+    long, so look for that first: a whitelisted name that extends what was
+    typed, or that what was typed extends. Of those, take the one closest
+    in length to what was typed -- the least-changed reading of it -- and
+    break a remaining tie alphabetically. Only when nothing is related
+    that way fall back to `_suggest`, which is shared with the key, type
+    and choice messages and is left alone.
+
+    Parameters
+    ----------
+    name : str
+        The name that was called and is not a whitelisted function.
+
+    Returns
+    -------
+    str
+        Either `""` or a fragment like `" Did you mean 'minimum'?"`.
+    """
+
+    related = [candidate for candidate in sorted(_EXPRESSION_FUNCTIONS)
+               if candidate.startswith(name) or name.startswith(candidate)]
+
+    if not related:
+        return _suggest(name, _EXPRESSION_FUNCTIONS)
+
+    # `min` over a sorted list keeps the first of equally close names, so
+    # the alphabetical tie-break costs nothing extra.
+    closest = min(related, key = lambda candidate: abs(len(candidate) - len(name)))
+
+    return f" Did you mean {closest!r}?"
+
+
 def _check_expression_node(node, expression):
     """
     Recursively check one node of a parsed expression against the whitelist.
@@ -942,7 +984,7 @@ def _check_expression_node(node, expression):
         if node.func.id not in _EXPRESSION_FUNCTIONS:
             _reject(expression,
                     f"{node.func.id!r} is not a callable function."
-                    f"{_suggest(node.func.id, _EXPRESSION_FUNCTIONS)}")
+                    f"{_suggest_function(node.func.id)}")
         if node.keywords:
             _reject(expression, "keyword arguments are not allowed in a call.")
         for argument in node.args:
