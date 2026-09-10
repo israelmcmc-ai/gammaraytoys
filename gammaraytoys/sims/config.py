@@ -282,6 +282,81 @@ def _check_keys(block, where, allowed, required = ()):
             f"Keys allowed here: {sorted(allowed)}.")
 
 
+def _parse_quantity(text):
+    """
+    Turn one unit-bearing string into a `Quantity`, arrays included.
+
+    The scalar form (`"16 cm"`) goes straight to astropy, which has always
+    understood it. The array form (`"[30, 0, 1] cm"`) is taken apart here
+    instead: parsing a bracketed list out of a string is a *recent*
+    astropy feature, this package requires no particular astropy version
+    and supports Python 3.10, where an older one is what gets installed --
+    and there the whole array form of the schema silently stops working.
+    Splitting the brackets off ourselves and handing astropy only a unit
+    and a list of numbers works on every version. It also suits this
+    module: everything here is validated by hand.
+
+    Parameters
+    ----------
+    text : str
+        The value as it was written, e.g. `"16 cm"` or `"[30, 0, 1] cm"`.
+        Whitespace inside the brackets is free.
+
+    Returns
+    -------
+    `astropy.units.Quantity`
+        Scalar for the scalar form, one-dimensional for the array form --
+        `"[5] mm"` is a one-element array, not a scalar.
+
+    Raises
+    ------
+    ValueError
+        If the brackets do not close, hold no numbers, or hold something
+        that is not a number, or if the trailing text is not a unit
+        astropy knows. `_quantity` wraps whatever comes out of here in the
+        message that names the key it came from.
+    """
+
+    stripped = text.strip()
+
+    if not stripped.startswith('['):
+        return u.Quantity(stripped)
+
+    closing = stripped.find(']')
+
+    if closing < 0:
+        raise ValueError(
+            f'Cannot parse "{text}" as a Quantity: the array is missing its '
+            f'closing "]".')
+
+    inside = stripped[1:closing]
+    unit_text = stripped[closing + 1:].strip()
+
+    try:
+        # `ast.literal_eval` is the safe half of `eval`: it reads number
+        # literals and lists of them, and nothing else -- no names, no
+        # calls. The same reason `TimeExpression` below never uses bare
+        # `eval`, for a much smaller job.
+        values = ast.literal_eval(f"[{inside}]")
+    except (SyntaxError, ValueError) as err:
+        raise ValueError(
+            f'Cannot parse "{text}" as a Quantity: {inside!r} is not a list '
+            f'of numbers.') from err
+
+    if len(values) == 0:
+        raise ValueError(
+            f'Cannot parse "{text}" as a Quantity: the array is empty.')
+
+    try:
+        numbers = np.array(values, dtype = float)
+    except (TypeError, ValueError) as err:
+        raise ValueError(
+            f'Cannot parse "{text}" as a Quantity: {inside!r} is not a list '
+            f'of numbers.') from err
+
+    return numbers * u.Unit(unit_text)
+
+
 def _quantity(block, key, where, unit, default = None, required = False,
               minimum = None, maximum = None, shape = 'scalar'):
     """
@@ -349,7 +424,7 @@ def _quantity(block, key, where, unit, default = None, required = False,
             f"({text!r}).{extra}")
 
     try:
-        quantity = u.Quantity(text)
+        quantity = _parse_quantity(text)
     except Exception as err:
         raise ValueError(
             f"{where}: key {key!r} = {text!r} is not a valid quantity "
