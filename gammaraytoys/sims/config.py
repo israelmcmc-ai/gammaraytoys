@@ -1613,8 +1613,14 @@ def scaling_from_config(config, where = 'scaling'):
             filename = _text(block, 'file', where, required = True)
             try:
                 return TabulatedScaling.open(filename)
-            except FileNotFoundError:
-                raise
+            except FileNotFoundError as err:
+                # Still a FileNotFoundError -- "the file is missing" is a
+                # different problem from "the file is wrong", and a caller
+                # may reasonably want to tell them apart. Only the message
+                # changes: on its own it says nothing but the path, which in
+                # a file with a dozen scalings in it does not say which one.
+                raise FileNotFoundError(
+                    f"{where}: key 'file' = {filename!r} does not exist.") from err
             except Exception as err:
                 raise ValueError(
                     f"{where}: could not read the table from {filename!r} "
@@ -1828,7 +1834,7 @@ def source_from_config(config, where = 'source', earth = None):
     - `PointSource`: `offaxis_angle` **or** `sky_angle` -- exactly one, the
       first putting the source at a fixed detector-frame angle and the
       second on the inertial sky -- plus `flux`, or `flux_pivot` with
-      `pivot_energy`.
+      `pivot_energy`, never both.
     - `IsotropicSource`: `flux`.
     - `NearPointSource`: `position` (a block of `x` and `y`) and `rate`.
     - `ExtendedSource`: `sky_angle`, `width` and `flux`.
@@ -1870,6 +1876,14 @@ def source_from_config(config, where = 'source', earth = None):
     kwargs = _common_source_kwargs(block, where)
 
     if name == 'PointSource':
+        if 'flux' in block and ('flux_pivot' in block or 'pivot_energy' in block):
+            raise ValueError(
+                f"{where}: a PointSource's normalisation is given either as "
+                f"'flux' or as 'flux_pivot' with 'pivot_energy', not both. "
+                f"`PointSource` prefers 'flux' and drops the pivot pair "
+                f"without saying so, and 'to_config' then writes the file "
+                f"back out with only the 'flux' in it.")
+
         # Both are read and both are passed on, even when one (or neither)
         # is there: `PointSource` itself enforces "exactly one of the two",
         # and its message is better than anything invented here.
@@ -2266,8 +2280,11 @@ def _spacecraft_history_from_config(config, where, earth):
     if isinstance(config, str):
         try:
             history = SpacecraftHistory.open(config, earth = earth)
-        except FileNotFoundError:
-            raise
+        except FileNotFoundError as err:
+            # As for a Tabulated scaling's 'file': the type is kept, only
+            # the message gains the key that asked for the path.
+            raise FileNotFoundError(
+                f"{where} = {config!r} does not exist.") from err
         except Exception as err:
             raise ValueError(
                 f"{where}: could not read the spacecraft history from "
