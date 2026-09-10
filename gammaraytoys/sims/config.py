@@ -1954,7 +1954,9 @@ def source_from_config(config, where = 'source', earth = None):
         `PointSource` given both `offaxis_angle` and `sky_angle` or
         neither, whose own error is surfaced rather than replaced. Also
         on a `PointSource` given `flux` beside the pivot pair, or only
-        one half of that pair.
+        one half of that pair, or a pivot pair whose `pivot_energy` lands
+        where the spectrum has zero probability density, which would
+        otherwise resolve to an infinite `flux`.
     """
 
     block = _as_mapping(config, where)
@@ -2001,6 +2003,31 @@ def source_from_config(config, where = 'source', earth = None):
                                          u.Unit('1 / (cm s keV)'), minimum = 0)
         kwargs['pivot_energy'] = _quantity(block, 'pivot_energy', where, u.keV,
                                            minimum = 0)
+
+        # A third silent wrong answer, one step past the pair being
+        # complete: `PointSource` divides `flux_pivot` by the spectrum's
+        # probability density at `pivot_energy`, and that density is
+        # exactly zero outside the spectrum's own energy range. The
+        # division still "succeeds" -- it just returns infinity, with
+        # nothing louder than a numpy warning that is easy to have
+        # suppressed -- and 'to_config' then writes `flux: inf ...` back
+        # into the file as if it were a deliberate value.
+        if kwargs['flux'] is None and kwargs['flux_pivot'] is not None:
+            spectrum = kwargs['spectrum']
+            pivot_energy = kwargs['pivot_energy']
+            resolved_flux = (kwargs['flux_pivot'] / spectrum.pdf(pivot_energy)).to(u.Unit('1 / (cm s)'))
+            if not np.isfinite(resolved_flux):
+                raise ValueError(
+                    f"{where}: key 'pivot_energy' = {pivot_energy} has zero "
+                    f"probability density on this spectrum, so there is no "
+                    f"total flux that 'flux_pivot' could correspond to. The "
+                    f"spectrum's energy range is "
+                    f"[{spectrum.min_energy}, {spectrum.max_energy}]; "
+                    f"'pivot_energy' ordinarily needs to fall inside it "
+                    f"(a `MultiComponentSpectrum` can still have zero "
+                    f"density inside its overall range, in a gap none of "
+                    f"its components cover).")
+
         source_class = PointSource
 
     elif name == 'IsotropicSource':
