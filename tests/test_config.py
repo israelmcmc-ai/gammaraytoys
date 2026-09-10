@@ -26,10 +26,11 @@ from gammaraytoys.sims import (
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
     MultiComponentSpectrum, NadirPointing, NearPointSource, ObservationStrategy,
     PointSource,
-    PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
+    PowerLawSpectrum, Reconstructor, SimpleTraditionalReconstructor,
+    SpacecraftHistory,
     Source, SourceScaling, SpinPointing, Simulator, Spectrum,
     TabulatedScaling, TargetedPointing, ZenithPointing,
-    load_config, reconstructor_from_config, reconstructor_to_config,
+    load_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
 # do on every astropy this project supports: parsing a bracketed list out of a
@@ -695,19 +696,19 @@ def test_earth_nonpositive_radius_raises():
 
 
 def test_reconstructor_round_trips():
-    reconstructor = reconstructor_from_config({'type': 'SimpleTraditionalReconstructor'})
+    reconstructor = Reconstructor.from_config({'type': 'SimpleTraditionalReconstructor'})
     assert isinstance(reconstructor, SimpleTraditionalReconstructor)
-    assert reconstructor_to_config(reconstructor) == {'type': 'SimpleTraditionalReconstructor'}
+    assert reconstructor.to_config() == {'type': 'SimpleTraditionalReconstructor'}
 
 
 def test_reconstructor_unknown_key_raises():
     with pytest.raises(ValueError, match='bogus'):
-        reconstructor_from_config({'type': 'SimpleTraditionalReconstructor', 'bogus': 1})
+        Reconstructor.from_config({'type': 'SimpleTraditionalReconstructor', 'bogus': 1})
 
 
 def test_reconstructor_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown reconstructor type'):
-        reconstructor_from_config({'type': 'MLReconstructor'})
+        Reconstructor.from_config({'type': 'MLReconstructor'})
 
 
 # ===========================================================================

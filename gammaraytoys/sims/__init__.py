@@ -16,6 +16,5 @@ from .spacecraft_history import SpacecraftHistory, SpacecraftInterval
 from .observation_strategy import (ObservationStrategy, ZenithPointing, NadirPointing,
                                    InertialPointing, SpinPointing, TargetedPointing)
 from .config import (load_config,
-                     reconstructor_from_config, reconstructor_to_config,
                      spacecraft_history_from_config,
                      simulator_from_config, simulator_to_config)

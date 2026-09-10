@@ -151,13 +151,12 @@ from .config_utils import (_as_mapping, _boolean, _check_keys, _format_quantity,
                            _searched_dir, _text, _type_name)
 from .earth import Earth
 from .observation_strategy import ObservationStrategy
-from .reco import SimpleTraditionalReconstructor
+from .reco import Reconstructor, SimpleTraditionalReconstructor
 from .source import Source
 from .spacecraft_history import SpacecraftHistory
 
 
 __all__ = ['load_config',
-           'reconstructor_from_config', 'reconstructor_to_config',
            'spacecraft_history_from_config',
            'simulator_from_config', 'simulator_to_config']
 
@@ -418,71 +417,6 @@ def _spacecraft_history_from_config(config, where, earth, base_dir = None):
     return history, canonical
 
 
-#: Accepted spellings of every reconstructor type.
-_RECONSTRUCTOR_TYPES = {'SimpleTraditionalReconstructor': 'SimpleTraditionalReconstructor'}
-
-
-def reconstructor_from_config(config, where = 'reconstructor'):
-    """
-    Build a `Reconstructor` from its configuration block.
-
-    ```yaml
-    {type: SimpleTraditionalReconstructor}
-    ```
-
-    Parameters
-    ----------
-    config : mapping
-        The `reconstructor` block.
-    where : str
-        Label for this block in error messages.
-
-    Returns
-    -------
-    `Reconstructor`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key.
-    """
-
-    block = _as_mapping(config, where)
-    _type_name(block, where, _RECONSTRUCTOR_TYPES, 'reconstructor')
-    _check_keys(block, where, ('type',))
-
-    return SimpleTraditionalReconstructor()
-
-
-def reconstructor_to_config(reconstructor):
-    """
-    Write a `Reconstructor` back out as a configuration block.
-
-    Parameters
-    ----------
-    reconstructor : `Reconstructor`
-        The reconstructor to describe.
-
-    Returns
-    -------
-    dict
-        `{'type': 'SimpleTraditionalReconstructor'}`.
-
-    Raises
-    ------
-    ValueError
-        If `reconstructor` is not a type a configuration can name.
-    """
-
-    if isinstance(reconstructor, SimpleTraditionalReconstructor):
-        return {'type': 'SimpleTraditionalReconstructor'}
-
-    raise ValueError(
-        f"{type(reconstructor).__name__} is not a reconstructor a "
-        f"configuration can describe; the types that are: "
-        f"{sorted(set(_RECONSTRUCTOR_TYPES.values()))}.")
-
-
 # ---------------------------------------------------------------------------
 # The whole run
 # ---------------------------------------------------------------------------
@@ -647,7 +581,7 @@ def simulator_from_config(cls, config, inertial):
 
     detector = ToyTracker2D.from_config(block['detector'], f"{where}.detector")
 
-    reconstructor = (reconstructor_from_config(block['reconstructor'],
+    reconstructor = (Reconstructor.from_config(block['reconstructor'],
                                                f"{where}.reconstructor")
                      if 'reconstructor' in block
                      else SimpleTraditionalReconstructor())
@@ -735,7 +669,7 @@ def simulator_to_config(simulator):
     if earth is not None:
         config['earth'] = earth.to_config()
 
-    config['reconstructor'] = reconstructor_to_config(simulator.reconstructor)
+    config['reconstructor'] = simulator.reconstructor.to_config()
 
     if not simulator.doppler_broadening:
         config['doppler_broadening'] = False
