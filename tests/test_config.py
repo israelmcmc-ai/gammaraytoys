@@ -1491,10 +1491,10 @@ def test_a_missing_spacecraft_history_file_names_the_key():
 # Part P -- `_suggest` still answers for keys, types and choices
 # ===========================================================================
 #
-# The function-name suggestions grew a rule of their own (see
-# `tests/test_config_expression.py`, Part H). The plain edit-distance
-# suggestion it fell out of is shared with the three messages below and was
-# left alone; these pin that it still behaves as it did.
+# `_suggest` is the plain edit-distance suggestion shared by the three
+# messages below -- a mistyped key, a mistyped type, a mistyped choice.
+# (It once had a companion rule for expression function names; that went
+# with the expression evaluator.)
 
 def test_a_mistyped_key_is_suggested():
     with pytest.raises(ValueError, match="Did you mean 'radius'") as caught:
