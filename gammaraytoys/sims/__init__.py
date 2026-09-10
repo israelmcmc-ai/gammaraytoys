@@ -18,7 +18,6 @@ from .observation_strategy import (ObservationStrategy, ZenithPointing, NadirPoi
 from .config import (load_config,
                      detector_from_config, detector_to_config,
                      earth_from_config, earth_to_config,
-                     scaling_from_config, scaling_to_config,
                      source_from_config, source_to_config,
                      observation_strategy_from_config, observation_strategy_to_config,
                      reconstructor_from_config, reconstructor_to_config,

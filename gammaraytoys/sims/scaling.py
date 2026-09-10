@@ -16,6 +16,10 @@ import numpy as np
 import pandas as pd
 import astropy.units as u
 
+from .config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                           _format_quantity, _number, _quantity, _resolve_path,
+                           _searched_dir, _text)
+
 
 __all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling',
            'BurstScaling', 'SinusoidalScaling']
@@ -90,6 +94,220 @@ class SourceScaling(ABC):
             A finite, non-negative, unitless multiplier.
         """
         pass
+
+
+    @classmethod
+    def from_config(cls, config, where = 'scaling', base_dir = None):
+        """
+        Build a `SourceScaling` from its configuration block.
+
+        ```yaml
+        {type: Constant, scale: 1.0}
+        {type: Tabulated, time: "[0, 100, 200] s", scale: [1.0, 2.0, 0.5]}
+        {type: Tabulated, file: lightcurve.csv}
+        {type: Burst, start: 100 s, duration: 50 s, amplitude: 20.0}
+        {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
+        ```
+
+        A tabulated scaling is given either inline (`time` and `scale`
+        together) or as a two-column `time_s,scale` CSV `file`, never both.
+
+        A burst's `amplitude` defaults to 1.0, and a sinusoid's
+        `reference_time` -- the time its sine is zero and rising -- to `0 s`.
+        A sinusoid's `period` is the **full** period, so a modulation that
+        repeats once per orbit is written with the orbital period and no
+        factor of `2 * pi` anywhere.
+
+        Called on `SourceScaling`, the block's `type` chooses the class.
+        Called on one of the four concrete classes, that class is what gets
+        built: `type` may name it or be left out, and naming a different one
+        raises rather than quietly handing back the other class.
+
+        Parameters
+        ----------
+        config : mapping
+            The `scaling` block.
+        where : str
+            Label for this block in error messages.
+        base_dir : `pathlib.Path` or None
+            The directory a relative `file` is taken relative to -- the
+            directory of the configuration file, when there was one. `None`
+            (the default, and what a configuration handed in as a mapping
+            gets) leaves a relative path resolving against the working
+            directory. An absolute `file` is unaffected either way.
+
+        Returns
+        -------
+        `SourceScaling`
+
+        Raises
+        ------
+        ValueError
+            On an unknown type or key, a missing required key, a table given
+            both ways or neither, or a value the scaling itself rejects (a
+            table with unsorted times or a negative scale, a burst of zero
+            duration, a sinusoid whose `amplitude` exceeds its `mean` and so
+            goes negative for part of every cycle).
+        """
+
+        block = _as_mapping(config, where)
+        name = _dispatch_type_name(cls, SourceScaling, block, where, _SCALING_TYPES,
+                                   _SCALING_CLASSES, 'scaling')
+
+        if name == 'Constant':
+            _check_keys(block, where, ('type', 'scale'))
+
+            return ConstantScaling(
+                scale = _number(block, 'scale', where, default = 1.0, minimum = 0))
+
+        if name == 'Tabulated':
+            _check_keys(block, where, ('type', 'time', 'scale', 'file'))
+
+            has_file = 'file' in block
+            has_inline = 'time' in block or 'scale' in block
+
+            if has_file and has_inline:
+                raise ValueError(
+                    f"{where}: a Tabulated scaling is given either as a 'file' or "
+                    f"as inline 'time' and 'scale', not both.")
+
+            if has_file:
+                filename = _text(block, 'file', where, required = True)
+                path = _resolve_path(filename, base_dir)
+                try:
+                    return TabulatedScaling.open(path)
+                except FileNotFoundError as err:
+                    # Still a FileNotFoundError -- "the file is missing" is a
+                    # different problem from "the file is wrong", and a caller
+                    # may reasonably want to tell them apart. Only the message
+                    # changes: on its own it says nothing but the path, which in
+                    # a file with a dozen scalings in it does not say which one,
+                    # nor where it was looked for.
+                    raise FileNotFoundError(
+                        f"{where}: key 'file' = {filename!r} does not exist "
+                        f"(looked in {_searched_dir(path)}).") from err
+                except Exception as err:
+                    raise ValueError(
+                        f"{where}: could not read the table from {filename!r} "
+                        f"({type(err).__name__}: {err}).") from err
+
+            if not has_inline:
+                raise ValueError(
+                    f"{where}: a Tabulated scaling needs either a 'file' or inline "
+                    f"'time' and 'scale'.")
+
+            time = _quantity(block, 'time', where, u.s, required = True, shape = 'array')
+            scale = _number(block, 'scale', where, required = True, minimum = 0,
+                            shape = 'any')
+
+            if np.ndim(scale) == 0:
+                scale = [scale]
+
+            try:
+                return TabulatedScaling(time = time, scale = scale)
+            except Exception as err:
+                raise ValueError(f"{where}: {err}") from err
+
+        if name == 'Burst':
+            keys = ('type', 'start', 'duration', 'amplitude')
+            _check_keys(block, where, keys, required = ('start', 'duration'))
+
+            start = _quantity(block, 'start', where, u.s, required = True)
+            duration = _quantity(block, 'duration', where, u.s, required = True,
+                                 minimum = 0)
+            amplitude = _number(block, 'amplitude', where, default = 1.0,
+                                minimum = 0)
+
+            # `minimum = 0` above is inclusive, so a zero duration reaches
+            # `BurstScaling` and is refused there. Re-raising with `where` in
+            # front is what every block here does with a message the class
+            # itself wrote: the class knows what is wrong, only this method
+            # knows where in the file it was written.
+            try:
+                return BurstScaling(start = start, duration = duration,
+                                    amplitude = amplitude)
+            except Exception as err:
+                raise ValueError(f"{where}: {err}") from err
+
+        keys = ('type', 'mean', 'amplitude', 'period', 'reference_time')
+        _check_keys(block, where, keys, required = ('mean', 'amplitude', 'period'))
+
+        mean = _number(block, 'mean', where, required = True, minimum = 0)
+        amplitude = _number(block, 'amplitude', where, required = True, minimum = 0)
+        period = _quantity(block, 'period', where, u.s, required = True, minimum = 0)
+        reference_time = _quantity(block, 'reference_time', where, u.s,
+                                   default = 0 * u.s)
+
+        try:
+            return SinusoidalScaling(mean = mean, amplitude = amplitude,
+                                     period = period,
+                                     reference_time = reference_time)
+        except Exception as err:
+            raise ValueError(f"{where}: {err}") from err
+
+    def to_config(self):
+        """
+        Write this scaling back out as a configuration block.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A block `SourceScaling.from_config` reads back into an equal
+            scaling. A `TabulatedScaling` is always written inline,
+            including when it was read from a file: the table is data, and
+            inlining it keeps the written configuration self-contained.
+
+        Raises
+        ------
+        ValueError
+            If this is not one of the four types a configuration can name.
+            The four are handled below; anything else that subclasses
+            `SourceScaling` falls through to the raise, which is the only
+            honest answer -- a configuration has no `type` name for it.
+        """
+
+        # One method rather than four overrides, so that the whole written
+        # schema for scalings reads top to bottom in one place, next to the
+        # `from_config` that reads it back.
+        if isinstance(self, ConstantScaling):
+            return {'type': 'Constant', 'scale': float(self.scale)}
+
+        if isinstance(self, TabulatedScaling):
+            return {'type': 'Tabulated',
+                    'time': _format_quantity(self.time),
+                    'scale': [float(item) for item in self.scale]}
+
+        if isinstance(self, BurstScaling):
+            block = {'type': 'Burst',
+                     'start': _format_quantity(self.start),
+                     'duration': _format_quantity(self.duration)}
+
+            # Omitted when it is the default, like every other optional key
+            # here: a canonical block says only what is not already implied.
+            if self.amplitude != 1.0:
+                block['amplitude'] = float(self.amplitude)
+
+            return block
+
+        if isinstance(self, SinusoidalScaling):
+            block = {'type': 'Sinusoidal',
+                     'mean': float(self.mean),
+                     'amplitude': float(self.amplitude),
+                     'period': _format_quantity(self.period)}
+
+            if self.reference_time != 0 * u.s:
+                block['reference_time'] = _format_quantity(self.reference_time)
+
+            return block
+
+        raise ValueError(
+            f"{type(self).__name__} is not a scaling a configuration can "
+            f"describe; the types that are: "
+            f"{sorted(set(_SCALING_TYPES.values()))}.")
 
 
 class ConstantScaling(SourceScaling):
@@ -583,3 +801,29 @@ class SinusoidalScaling(SourceScaling):
         phase = 2 * np.pi * (t - self._reference_time_s) / self._period_s
 
         return float(self._mean + self._amplitude * np.sin(phase))
+
+
+# ---------------------------------------------------------------------------
+# What a configuration may call each of these classes.
+#
+# Both tables sit at the bottom of the file because the second one names the
+# classes above: `SourceScaling.from_config` looks them up when it runs, long
+# after this module has finished importing.
+# ---------------------------------------------------------------------------
+
+
+#: Accepted spellings of every scaling type, mapped to the canonical one.
+_SCALING_TYPES = {'Constant': 'Constant',
+                  'ConstantScaling': 'Constant',
+                  'Tabulated': 'Tabulated',
+                  'TabulatedScaling': 'Tabulated',
+                  'Burst': 'Burst',
+                  'BurstScaling': 'Burst',
+                  'Sinusoidal': 'Sinusoidal',
+                  'SinusoidalScaling': 'Sinusoidal'}
+
+#: The class each canonical scaling type builds.
+_SCALING_CLASSES = {'Constant': ConstantScaling,
+                    'Tabulated': TabulatedScaling,
+                    'Burst': BurstScaling,
+                    'Sinusoidal': SinusoidalScaling}

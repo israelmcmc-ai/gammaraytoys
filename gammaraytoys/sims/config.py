@@ -154,8 +154,7 @@ from .earth import Earth
 from .observation_strategy import (ZenithPointing, NadirPointing, InertialPointing,
                                    SpinPointing, TargetedPointing)
 from .reco import SimpleTraditionalReconstructor
-from .scaling import (ConstantScaling, TabulatedScaling, BurstScaling,
-                      SinusoidalScaling)
+from .scaling import ConstantScaling, SourceScaling
 from .source import (PointSource, IsotropicSource, NearPointSource, ExtendedSource,
                      EarthAlbedoSource)
 from .spacecraft_history import SpacecraftHistory
@@ -165,7 +164,6 @@ from .spectrum import Spectrum
 __all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
            'earth_from_config', 'earth_to_config',
-           'scaling_from_config', 'scaling_to_config',
            'source_from_config', 'source_to_config',
            'observation_strategy_from_config', 'observation_strategy_to_config',
            'reconstructor_from_config', 'reconstructor_to_config',
@@ -429,226 +427,6 @@ def earth_to_config(earth):
 
 
 # ---------------------------------------------------------------------------
-# Scalings
-# ---------------------------------------------------------------------------
-
-
-#: Accepted spellings of every scaling type, mapped to the canonical one.
-_SCALING_TYPES = {'Constant': 'Constant',
-                  'ConstantScaling': 'Constant',
-                  'Tabulated': 'Tabulated',
-                  'TabulatedScaling': 'Tabulated',
-                  'Burst': 'Burst',
-                  'BurstScaling': 'Burst',
-                  'Sinusoidal': 'Sinusoidal',
-                  'SinusoidalScaling': 'Sinusoidal'}
-
-
-def scaling_from_config(config, where = 'scaling', base_dir = None):
-    """
-    Build a `SourceScaling` from its configuration block.
-
-    ```yaml
-    {type: Constant, scale: 1.0}
-    {type: Tabulated, time: "[0, 100, 200] s", scale: [1.0, 2.0, 0.5]}
-    {type: Tabulated, file: lightcurve.csv}
-    {type: Burst, start: 100 s, duration: 50 s, amplitude: 20.0}
-    {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
-    ```
-
-    A tabulated scaling is given either inline (`time` and `scale`
-    together) or as a two-column `time_s,scale` CSV `file`, never both.
-
-    A burst's `amplitude` defaults to 1.0, and a sinusoid's
-    `reference_time` -- the time its sine is zero and rising -- to `0 s`.
-    A sinusoid's `period` is the **full** period, so a modulation that
-    repeats once per orbit is written with the orbital period and no
-    factor of `2 * pi` anywhere.
-
-    Parameters
-    ----------
-    config : mapping
-        The `scaling` block.
-    where : str
-        Label for this block in error messages.
-    base_dir : `pathlib.Path` or None
-        The directory a relative `file` is taken relative to -- the
-        directory of the configuration file, when there was one. `None`
-        (the default, and what a configuration handed in as a mapping
-        gets) leaves a relative path resolving against the working
-        directory. An absolute `file` is unaffected either way.
-
-    Returns
-    -------
-    `SourceScaling`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key, a missing required key, a table given
-        both ways or neither, or a value the scaling itself rejects (a
-        table with unsorted times or a negative scale, a burst of zero
-        duration, a sinusoid whose `amplitude` exceeds its `mean` and so
-        goes negative for part of every cycle).
-    """
-
-    block = _as_mapping(config, where)
-    name = _type_name(block, where, _SCALING_TYPES, 'scaling')
-
-    if name == 'Constant':
-        _check_keys(block, where, ('type', 'scale'))
-
-        return ConstantScaling(
-            scale = _number(block, 'scale', where, default = 1.0, minimum = 0))
-
-    if name == 'Tabulated':
-        _check_keys(block, where, ('type', 'time', 'scale', 'file'))
-
-        has_file = 'file' in block
-        has_inline = 'time' in block or 'scale' in block
-
-        if has_file and has_inline:
-            raise ValueError(
-                f"{where}: a Tabulated scaling is given either as a 'file' or "
-                f"as inline 'time' and 'scale', not both.")
-
-        if has_file:
-            filename = _text(block, 'file', where, required = True)
-            path = _resolve_path(filename, base_dir)
-            try:
-                return TabulatedScaling.open(path)
-            except FileNotFoundError as err:
-                # Still a FileNotFoundError -- "the file is missing" is a
-                # different problem from "the file is wrong", and a caller
-                # may reasonably want to tell them apart. Only the message
-                # changes: on its own it says nothing but the path, which in
-                # a file with a dozen scalings in it does not say which one,
-                # nor where it was looked for.
-                raise FileNotFoundError(
-                    f"{where}: key 'file' = {filename!r} does not exist "
-                    f"(looked in {_searched_dir(path)}).") from err
-            except Exception as err:
-                raise ValueError(
-                    f"{where}: could not read the table from {filename!r} "
-                    f"({type(err).__name__}: {err}).") from err
-
-        if not has_inline:
-            raise ValueError(
-                f"{where}: a Tabulated scaling needs either a 'file' or inline "
-                f"'time' and 'scale'.")
-
-        time = _quantity(block, 'time', where, u.s, required = True, shape = 'array')
-        scale = _number(block, 'scale', where, required = True, minimum = 0,
-                        shape = 'any')
-
-        if np.ndim(scale) == 0:
-            scale = [scale]
-
-        try:
-            return TabulatedScaling(time = time, scale = scale)
-        except Exception as err:
-            raise ValueError(f"{where}: {err}") from err
-
-    if name == 'Burst':
-        keys = ('type', 'start', 'duration', 'amplitude')
-        _check_keys(block, where, keys, required = ('start', 'duration'))
-
-        start = _quantity(block, 'start', where, u.s, required = True)
-        duration = _quantity(block, 'duration', where, u.s, required = True,
-                             minimum = 0)
-        amplitude = _number(block, 'amplitude', where, default = 1.0,
-                            minimum = 0)
-
-        # `minimum = 0` above is inclusive, so a zero duration reaches
-        # `BurstScaling` and is refused there. Re-raising with `where` in
-        # front is what every block here does with a message the class
-        # itself wrote: the class knows what is wrong, only this function
-        # knows where in the file it was written.
-        try:
-            return BurstScaling(start = start, duration = duration,
-                                amplitude = amplitude)
-        except Exception as err:
-            raise ValueError(f"{where}: {err}") from err
-
-    keys = ('type', 'mean', 'amplitude', 'period', 'reference_time')
-    _check_keys(block, where, keys, required = ('mean', 'amplitude', 'period'))
-
-    mean = _number(block, 'mean', where, required = True, minimum = 0)
-    amplitude = _number(block, 'amplitude', where, required = True, minimum = 0)
-    period = _quantity(block, 'period', where, u.s, required = True, minimum = 0)
-    reference_time = _quantity(block, 'reference_time', where, u.s,
-                               default = 0 * u.s)
-
-    try:
-        return SinusoidalScaling(mean = mean, amplitude = amplitude,
-                                 period = period,
-                                 reference_time = reference_time)
-    except Exception as err:
-        raise ValueError(f"{where}: {err}") from err
-
-
-def scaling_to_config(scaling):
-    """
-    Write a `SourceScaling` back out as a configuration block.
-
-    Parameters
-    ----------
-    scaling : `SourceScaling`
-        The scaling to describe.
-
-    Returns
-    -------
-    dict
-        A block `scaling_from_config` reads back into an equal scaling. A
-        `TabulatedScaling` is always written inline, including when it was
-        read from a file: the table is data, and inlining it keeps the
-        written configuration self-contained.
-
-    Raises
-    ------
-    ValueError
-        If `scaling` is not one of the four types a configuration can
-        name.
-    """
-
-    if isinstance(scaling, ConstantScaling):
-        return {'type': 'Constant', 'scale': float(scaling.scale)}
-
-    if isinstance(scaling, TabulatedScaling):
-        return {'type': 'Tabulated',
-                'time': _format_quantity(scaling.time),
-                'scale': [float(item) for item in scaling.scale]}
-
-    if isinstance(scaling, BurstScaling):
-        block = {'type': 'Burst',
-                 'start': _format_quantity(scaling.start),
-                 'duration': _format_quantity(scaling.duration)}
-
-        # Omitted when it is the default, like every other optional key
-        # here: a canonical block says only what is not already implied.
-        if scaling.amplitude != 1.0:
-            block['amplitude'] = float(scaling.amplitude)
-
-        return block
-
-    if isinstance(scaling, SinusoidalScaling):
-        block = {'type': 'Sinusoidal',
-                 'mean': float(scaling.mean),
-                 'amplitude': float(scaling.amplitude),
-                 'period': _format_quantity(scaling.period)}
-
-        if scaling.reference_time != 0 * u.s:
-            block['reference_time'] = _format_quantity(scaling.reference_time)
-
-        return block
-
-    raise ValueError(
-        f"{type(scaling).__name__} is not a scaling a configuration can "
-        f"describe; the types that are: "
-        f"{sorted(set(_SCALING_TYPES.values()))}.")
-
-
-# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 
@@ -724,7 +502,7 @@ def _common_source_kwargs(block, where, base_dir = None):
         Label for this block in error messages.
     base_dir : `pathlib.Path` or None
         The directory a relative path inside the `scaling` block resolves
-        against. See `scaling_from_config`.
+        against. See `SourceScaling.from_config`.
 
     Returns
     -------
@@ -747,8 +525,8 @@ def _common_source_kwargs(block, where, base_dir = None):
 
     scaling = None
     if 'scaling' in block:
-        scaling = scaling_from_config(block['scaling'], f"{where}.scaling",
-                                      base_dir = base_dir)
+        scaling = SourceScaling.from_config(block['scaling'], f"{where}.scaling",
+                                            base_dir = base_dir)
 
     chirality = _integer(block, 'chirality', where)
 
@@ -807,7 +585,7 @@ def source_from_config(config, where = 'source', earth = None, base_dir = None):
         rather than letting a run end up with two different planets.
     base_dir : `pathlib.Path` or None
         The directory a relative path inside this source's `scaling` block
-        resolves against. See `scaling_from_config`.
+        resolves against. See `SourceScaling.from_config`.
 
     Returns
     -------
@@ -1034,7 +812,7 @@ def source_to_config(source, name = None):
     scaling = source.scaling
 
     if not (isinstance(scaling, ConstantScaling) and scaling.scale == 1.0):
-        block['scaling'] = scaling_to_config(scaling)
+        block['scaling'] = scaling.to_config()
 
     if source.chirality is not None:
         block['chirality'] = int(source.chirality)
@@ -1455,7 +1233,7 @@ def _sources_from_config(config, where, earth, base_dir = None):
         The run's single Earth, handed to every source that needs one.
     base_dir : `pathlib.Path` or None
         The directory a relative path inside a source's `scaling` block
-        resolves against. See `scaling_from_config`.
+        resolves against. See `SourceScaling.from_config`.
 
     Returns
     -------

@@ -26,12 +26,12 @@ from gammaraytoys.sims import (
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
     MultiComponentSpectrum, NadirPointing, NearPointSource, PointSource,
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
-    SpinPointing, Simulator, Spectrum, TabulatedScaling, TargetedPointing,
-    ZenithPointing,
+    SourceScaling, SpinPointing, Simulator, Spectrum, TabulatedScaling,
+    TargetedPointing, ZenithPointing,
     detector_from_config, detector_to_config, earth_from_config, earth_to_config,
     load_config, observation_strategy_from_config, observation_strategy_to_config,
-    reconstructor_from_config, reconstructor_to_config, scaling_from_config,
-    scaling_to_config, source_from_config, source_to_config,
+    reconstructor_from_config, reconstructor_to_config, source_from_config,
+    source_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
 # do on every astropy this project supports: parsing a bracketed list out of a
@@ -201,36 +201,36 @@ def test_spectrum_unknown_key_raises():
 # ===========================================================================
 
 def test_constant_scaling_round_trips():
-    scaling = scaling_from_config({'type': 'Constant', 'scale': 2.5})
+    scaling = SourceScaling.from_config({'type': 'Constant', 'scale': 2.5})
     assert isinstance(scaling, ConstantScaling)
     assert scaling.scale == 2.5
-    assert scaling_to_config(scaling) == {'type': 'Constant', 'scale': 2.5}
+    assert scaling.to_config() == {'type': 'Constant', 'scale': 2.5}
 
 
 def test_constant_scaling_default_scale_is_one():
-    scaling = scaling_from_config({'type': 'Constant'})
+    scaling = SourceScaling.from_config({'type': 'Constant'})
     assert scaling.scale == 1.0
 
 
 def test_tabulated_scaling_inline_round_trips():
     block = {'type': 'Tabulated', 'time': '[0, 100, 200] s', 'scale': [1.0, 2.0, 0.5]}
-    scaling = scaling_from_config(block)
+    scaling = SourceScaling.from_config(block)
 
     assert isinstance(scaling, TabulatedScaling)
     np.testing.assert_allclose(scaling.time.to_value(u.s), [0, 100, 200])
     np.testing.assert_allclose(scaling.scale, [1.0, 2.0, 0.5])
 
-    out = scaling_to_config(scaling)
-    scaling2 = scaling_from_config(out)
-    assert scaling_to_config(scaling2) == out
+    out = scaling.to_config()
+    scaling2 = SourceScaling.from_config(out)
+    assert scaling2.to_config() == out
 
 
 def test_tabulated_scaling_single_row_round_trips():
     # `_number`'s scalar `scale` is wrapped into a one-element list before
-    # `TabulatedScaling` sees it (config.py's `scaling_from_config`); pin
+    # `TabulatedScaling` sees it (`SourceScaling.from_config`); pin
     # that this actually works for the smallest legal table.
     block = {'type': 'Tabulated', 'time': '[0] s', 'scale': 7.0}
-    scaling = scaling_from_config(block)
+    scaling = SourceScaling.from_config(block)
     assert scaling(0 * u.s) == 7.0
     assert scaling(1e9 * u.s) == 7.0
 
@@ -239,15 +239,15 @@ def test_tabulated_scaling_file_round_trips_and_is_written_inline(tmp_path):
     path = tmp_path / 'lightcurve.csv'
     path.write_text('time_s,scale\n0,1.0\n100,2.0\n200,0.5\n')
 
-    scaling = scaling_from_config({'type': 'Tabulated', 'file': str(path)})
+    scaling = SourceScaling.from_config({'type': 'Tabulated', 'file': str(path)})
     assert isinstance(scaling, TabulatedScaling)
 
-    out = scaling_to_config(scaling)
+    out = scaling.to_config()
     assert 'file' not in out
     assert 'time' in out and 'scale' in out
 
-    scaling2 = scaling_from_config(out)
-    assert scaling_to_config(scaling2) == out
+    scaling2 = SourceScaling.from_config(out)
+    assert scaling2.to_config() == out
 
 
 def test_tabulated_scaling_file_and_inline_together_raises(tmp_path):
@@ -255,22 +255,22 @@ def test_tabulated_scaling_file_and_inline_together_raises(tmp_path):
     path.write_text('time_s,scale\n0,1.0\n100,2.0\n')
     block = {'type': 'Tabulated', 'file': str(path), 'time': '[0, 100] s', 'scale': [1.0, 2.0]}
     with pytest.raises(ValueError, match='not both'):
-        scaling_from_config(block)
+        SourceScaling.from_config(block)
 
 
 def test_tabulated_scaling_neither_file_nor_inline_raises():
     with pytest.raises(ValueError, match='needs either'):
-        scaling_from_config({'type': 'Tabulated'})
+        SourceScaling.from_config({'type': 'Tabulated'})
 
 
 def test_scaling_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown scaling type'):
-        scaling_from_config({'type': 'Sinusoid', 'scale': 1.0})
+        SourceScaling.from_config({'type': 'Sinusoid', 'scale': 1.0})
 
 
 def test_scaling_unknown_key_raises():
     with pytest.raises(ValueError, match='bogus'):
-        scaling_from_config({'type': 'Constant', 'scale': 1.0, 'bogus': True})
+        SourceScaling.from_config({'type': 'Constant', 'scale': 1.0, 'bogus': True})
 
 
 # ===========================================================================
@@ -1469,7 +1469,7 @@ def test_a_missing_scaling_file_names_the_key_and_stays_a_file_not_found():
     # problem from "the file is wrong" -- but a configuration with a dozen
     # scalings in it needs to say which one.
     with pytest.raises(FileNotFoundError) as caught:
-        scaling_from_config({'type': 'Tabulated', 'file': 'lc.csv'})
+        SourceScaling.from_config({'type': 'Tabulated', 'file': 'lc.csv'})
 
     assert "key 'file' = 'lc.csv' does not exist" in str(caught.value)
 
