@@ -42,7 +42,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
 | 6 | Time-dependent scaling + event CSV I/O | merged | **Merged** (PR #20) |
-| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | Implemented, tested, reviewed; review findings fixed and re-tested. 637 tests green. Ready to open. |
+| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | **Open (PR #21)** — reviewed, review findings fixed and re-tested. 637 tests green. |
 
 Side PRs, outside the seven:
 
