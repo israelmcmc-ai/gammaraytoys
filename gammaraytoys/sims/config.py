@@ -159,13 +159,12 @@ from .scaling import (ConstantScaling, TabulatedScaling, BurstScaling,
 from .source import (PointSource, IsotropicSource, NearPointSource, ExtendedSource,
                      EarthAlbedoSource)
 from .spacecraft_history import SpacecraftHistory
-from .spectrum import MonoenergeticSpectrum, PowerLawSpectrum, MultiComponentSpectrum
+from .spectrum import Spectrum
 
 
 __all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
            'earth_from_config', 'earth_to_config',
-           'spectrum_from_config', 'spectrum_to_config',
            'scaling_from_config', 'scaling_to_config',
            'source_from_config', 'source_to_config',
            'observation_strategy_from_config', 'observation_strategy_to_config',
@@ -427,168 +426,6 @@ def earth_to_config(earth):
     """
 
     return {'radius': _format_quantity(earth.radius)}
-
-
-# ---------------------------------------------------------------------------
-# Spectra
-# ---------------------------------------------------------------------------
-
-
-#: Accepted spellings of every spectrum type, mapped to the canonical one.
-#: Both the short name the plan's Section 7 sketch uses and the full class
-#: name are accepted; the short one is what is written back out.
-_SPECTRUM_TYPES = {'Monoenergetic': 'Monoenergetic',
-                   'MonoenergeticSpectrum': 'Monoenergetic',
-                   'PowerLaw': 'PowerLaw',
-                   'PowerLawSpectrum': 'PowerLaw',
-                   'MultiComponent': 'MultiComponent',
-                   'MultiComponentSpectrum': 'MultiComponent'}
-
-
-def spectrum_from_config(config, where = 'spectrum'):
-    """
-    Build a `Spectrum` from its configuration block.
-
-    ```yaml
-    {type: Monoenergetic, energy: 511 keV}
-    {type: PowerLaw, index: -2, min_energy: 0.2 MeV, max_energy: 10 MeV}
-    {type: MultiComponent, components: [...], weights: [1, 3]}
-    ```
-
-    Parameters
-    ----------
-    config : mapping
-        The `spectrum` block.
-    where : str
-        Label for this block in error messages.
-
-    Returns
-    -------
-    `Spectrum`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key, a missing required key, a bad quantity,
-        a non-positive `min_energy`, a `max_energy` that does not exceed
-        it, or weights that do not match the components.
-    """
-
-    block = _as_mapping(config, where)
-    name = _type_name(block, where, _SPECTRUM_TYPES, 'spectrum')
-
-    if name == 'Monoenergetic':
-        _check_keys(block, where, ('type', 'energy'), required = ('energy',))
-
-        return MonoenergeticSpectrum(
-            energy = _quantity(block, 'energy', where, u.keV, required = True))
-
-    if name == 'PowerLaw':
-        keys = ('type', 'index', 'min_energy', 'max_energy')
-        _check_keys(block, where, keys, required = keys[1:])
-
-        index = _number(block, 'index', where, required = True)
-        min_energy = _quantity(block, 'min_energy', where, u.keV, required = True)
-        max_energy = _quantity(block, 'max_energy', where, u.keV, required = True)
-
-        # Both checked here rather than left to the sampler: a non-positive
-        # or inverted range reaches `NumericalInverseHermite` as a log of
-        # zero or a backwards domain, and what comes back is either a
-        # failure from deep inside scipy or -- worse -- a table that
-        # silently samples nonsense.
-        if min_energy <= 0 * min_energy.unit:
-            raise ValueError(
-                f"{where}: key 'min_energy' must be positive, got {min_energy}.")
-
-        if max_energy <= min_energy:
-            raise ValueError(
-                f"{where}: key 'max_energy' ({max_energy}) must be greater than "
-                f"'min_energy' ({min_energy}).")
-
-        return PowerLawSpectrum(index = index,
-                                min_energy = min_energy,
-                                max_energy = max_energy)
-
-    keys = ('type', 'components', 'weights')
-    _check_keys(block, where, keys, required = ('components',))
-
-    blocks = block['components']
-
-    if (not isinstance(blocks, Sequence) or isinstance(blocks, (str, bytes))
-            or len(blocks) == 0):
-        raise ValueError(
-            f"{where}: key 'components' must be a non-empty list of spectrum "
-            f"blocks, got {blocks!r}.")
-
-    components = [spectrum_from_config(item, f"{where}.components[{i}]")
-                  for i, item in enumerate(blocks)]
-
-    weights = _number(block, 'weights', where, minimum = 0, shape = 'any')
-
-    if weights is not None:
-        if np.ndim(weights) == 0:
-            weights = [weights]
-        if len(weights) != len(components):
-            raise ValueError(
-                f"{where}: key 'weights' has {len(weights)} entries but there "
-                f"are {len(components)} components.")
-        if sum(weights) <= 0:
-            raise ValueError(f"{where}: key 'weights' must not sum to zero.")
-
-    return MultiComponentSpectrum(*components, weights = weights)
-
-
-def spectrum_to_config(spectrum):
-    """
-    Write a `Spectrum` back out as a configuration block.
-
-    Parameters
-    ----------
-    spectrum : `Spectrum`
-        The spectrum to describe.
-
-    Returns
-    -------
-    dict
-        A block `spectrum_from_config` reads back into an equal spectrum.
-        Note two canonicalizations: `PowerLawSpectrum` holds `max_energy`
-        converted to `min_energy`'s unit, and `MultiComponentSpectrum`
-        holds its weights normalized to sum to one (and equal weights are
-        omitted, since that is the default).
-
-    Raises
-    ------
-    ValueError
-        If `spectrum` is not one of the three types a configuration can
-        name.
-    """
-
-    if isinstance(spectrum, MonoenergeticSpectrum):
-        return {'type': 'Monoenergetic',
-                'energy': _format_quantity(spectrum.energy)}
-
-    if isinstance(spectrum, PowerLawSpectrum):
-        return {'type': 'PowerLaw',
-                'index': float(spectrum.index),
-                'min_energy': _format_quantity(spectrum.min_energy),
-                'max_energy': _format_quantity(spectrum.max_energy)}
-
-    if isinstance(spectrum, MultiComponentSpectrum):
-        block = {'type': 'MultiComponent',
-                 'components': [spectrum_to_config(component)
-                                for component in spectrum.components]}
-
-        weights = np.asarray(spectrum.weights, dtype = float)
-
-        if not np.all(weights == weights[0]):
-            block['weights'] = [float(weight) for weight in weights]
-
-        return block
-
-    raise ValueError(
-        f"{type(spectrum).__name__} is not a spectrum a configuration can "
-        f"describe; the types that are: "
-        f"{sorted(set(_SPECTRUM_TYPES.values()))}.")
 
 
 # ---------------------------------------------------------------------------
@@ -906,7 +743,7 @@ def _common_source_kwargs(block, where, base_dir = None):
     if 'spectrum' not in block:
         raise ValueError(f"{where}: missing required key 'spectrum'.")
 
-    spectrum = spectrum_from_config(block['spectrum'], f"{where}.spectrum")
+    spectrum = Spectrum.from_config(block['spectrum'], f"{where}.spectrum")
 
     scaling = None
     if 'scaling' in block:
@@ -1192,7 +1029,7 @@ def source_to_config(source, name = None):
         if flux is not None:
             block['flux'] = _format_quantity(flux)
 
-    block['spectrum'] = spectrum_to_config(source.spectrum)
+    block['spectrum'] = source.spectrum.to_config()
 
     scaling = source.scaling
 

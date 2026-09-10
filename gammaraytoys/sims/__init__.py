@@ -1,7 +1,8 @@
 from .event import Interaction, Particle, Photon, Compton, Absorption, EventList
 from .event_csv import write_event_csv, read_event_csv
 from .reco import Reconstructor, SimpleTraditionalReconstructor
-from .spectrum import MonoenergeticSpectrum, PowerLawSpectrum, MultiComponentSpectrum
+from .spectrum import (Spectrum, MonoenergeticSpectrum, PowerLawSpectrum,
+                       MultiComponentSpectrum)
 from .source import (Source, FarFieldSource, NearFieldSource, PointSource,
                      IsotropicSource, NearPointSource, ExtendedSource,
                      EarthAlbedoSource)
@@ -17,7 +18,6 @@ from .observation_strategy import (ObservationStrategy, ZenithPointing, NadirPoi
 from .config import (load_config,
                      detector_from_config, detector_to_config,
                      earth_from_config, earth_to_config,
-                     spectrum_from_config, spectrum_to_config,
                      scaling_from_config, scaling_to_config,
                      source_from_config, source_to_config,
                      observation_strategy_from_config, observation_strategy_to_config,

@@ -26,12 +26,12 @@ from gammaraytoys.sims import (
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
     MultiComponentSpectrum, NadirPointing, NearPointSource, PointSource,
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
-    SpinPointing, Simulator, TabulatedScaling, TargetedPointing, ZenithPointing,
+    SpinPointing, Simulator, Spectrum, TabulatedScaling, TargetedPointing,
+    ZenithPointing,
     detector_from_config, detector_to_config, earth_from_config, earth_to_config,
     load_config, observation_strategy_from_config, observation_strategy_to_config,
     reconstructor_from_config, reconstructor_to_config, scaling_from_config,
-    scaling_to_config, source_from_config, source_to_config, spectrum_from_config,
-    spectrum_to_config,
+    scaling_to_config, source_from_config, source_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
 # do on every astropy this project supports: parsing a bracketed list out of a
@@ -89,87 +89,87 @@ def _minimal_detector_frame_config():
 
 def test_monoenergetic_spectrum_round_trips():
     block = {'type': 'Monoenergetic', 'energy': '511 keV'}
-    spectrum = spectrum_from_config(block)
+    spectrum = Spectrum.from_config(block)
 
     assert isinstance(spectrum, MonoenergeticSpectrum)
     assert spectrum.energy == 511 * u.keV
 
-    out = spectrum_to_config(spectrum)
+    out = spectrum.to_config()
     assert out['type'] == 'Monoenergetic'
     assert u.Quantity(out['energy']) == 511 * u.keV
 
-    spectrum2 = spectrum_from_config(out)
-    assert spectrum_to_config(spectrum2) == out
+    spectrum2 = Spectrum.from_config(out)
+    assert spectrum2.to_config() == out
 
 
 def test_monoenergetic_spectrum_accepts_full_class_name_alias():
-    spectrum = spectrum_from_config({'type': 'MonoenergeticSpectrum', 'energy': '1 MeV'})
+    spectrum = Spectrum.from_config({'type': 'MonoenergeticSpectrum', 'energy': '1 MeV'})
     assert isinstance(spectrum, MonoenergeticSpectrum)
     # The short name is always what is written back, regardless of which
     # spelling was read (module docstring, "Round trips").
-    assert spectrum_to_config(spectrum)['type'] == 'Monoenergetic'
+    assert spectrum.to_config()['type'] == 'Monoenergetic'
 
 
 def test_powerlaw_spectrum_round_trips():
     block = {'type': 'PowerLaw', 'index': -2, 'min_energy': '0.2 MeV', 'max_energy': '10 MeV'}
-    spectrum = spectrum_from_config(block)
+    spectrum = Spectrum.from_config(block)
 
     assert isinstance(spectrum, PowerLawSpectrum)
     assert spectrum.index == -2
     assert spectrum.min_energy == 0.2 * u.MeV
     assert spectrum.max_energy == 10 * u.MeV
 
-    out = spectrum_to_config(spectrum)
+    out = spectrum.to_config()
     assert out['type'] == 'PowerLaw'
     assert out['index'] == -2.0
     assert u.Quantity(out['min_energy']) == 0.2 * u.MeV
     assert u.Quantity(out['max_energy']) == 10 * u.MeV
 
-    spectrum2 = spectrum_from_config(out)
-    assert spectrum_to_config(spectrum2) == out
+    spectrum2 = Spectrum.from_config(out)
+    assert spectrum2.to_config() == out
 
 
 def test_powerlaw_spectrum_rejects_nonpositive_min_energy():
     block = {'type': 'PowerLaw', 'index': -2, 'min_energy': '0 MeV', 'max_energy': '10 MeV'}
     with pytest.raises(ValueError, match='min_energy'):
-        spectrum_from_config(block)
+        Spectrum.from_config(block)
 
 
 def test_powerlaw_spectrum_rejects_max_not_above_min():
     block = {'type': 'PowerLaw', 'index': -2, 'min_energy': '5 MeV', 'max_energy': '5 MeV'}
     with pytest.raises(ValueError, match='max_energy'):
-        spectrum_from_config(block)
+        Spectrum.from_config(block)
 
 
 def test_multicomponent_spectrum_round_trips_with_equal_weights_omitted():
     block = {'type': 'MultiComponent',
              'components': [_spectrum_block('511 keV'), _spectrum_block('1275 keV')]}
-    spectrum = spectrum_from_config(block)
+    spectrum = Spectrum.from_config(block)
 
     assert isinstance(spectrum, MultiComponentSpectrum)
     assert spectrum.ncomponents == 2
     np.testing.assert_allclose(spectrum.weights, [0.5, 0.5])
 
-    out = spectrum_to_config(spectrum)
+    out = spectrum.to_config()
     assert 'weights' not in out  # equal weights are the default: omitted
 
-    spectrum2 = spectrum_from_config(out)
-    assert spectrum_to_config(spectrum2) == out
+    spectrum2 = Spectrum.from_config(out)
+    assert spectrum2.to_config() == out
 
 
 def test_multicomponent_spectrum_round_trips_with_unequal_weights_kept():
     block = {'type': 'MultiComponent',
              'components': [_spectrum_block('511 keV'), _spectrum_block('1275 keV')],
              'weights': [1, 3]}
-    spectrum = spectrum_from_config(block)
+    spectrum = Spectrum.from_config(block)
 
     np.testing.assert_allclose(spectrum.weights, [0.25, 0.75])
 
-    out = spectrum_to_config(spectrum)
+    out = spectrum.to_config()
     assert out['weights'] == pytest.approx([0.25, 0.75])
 
-    spectrum2 = spectrum_from_config(out)
-    assert spectrum_to_config(spectrum2) == out
+    spectrum2 = Spectrum.from_config(out)
+    assert spectrum2.to_config() == out
     # NOTE: `MultiComponentSpectrum.random_energy()` is a known pre-existing
     # bug (returns shape-(1,) where the rest of this codebase expects a
     # scalar) that breaks `simulate_event`. Per TEST_BRIEF.md this is
@@ -182,18 +182,18 @@ def test_multicomponent_spectrum_rejects_mismatched_weights_length():
              'components': [_spectrum_block('511 keV'), _spectrum_block('1275 keV')],
              'weights': [1, 2, 3]}
     with pytest.raises(ValueError, match='weights'):
-        spectrum_from_config(block)
+        Spectrum.from_config(block)
 
 
 def test_spectrum_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown spectrum type'):
-        spectrum_from_config({'type': 'Gaussian', 'energy': '511 keV'})
+        Spectrum.from_config({'type': 'Gaussian', 'energy': '511 keV'})
 
 
 def test_spectrum_unknown_key_raises():
     block = {'type': 'Monoenergetic', 'energy': '511 keV', 'bogus': 1}
     with pytest.raises(ValueError, match='bogus'):
-        spectrum_from_config(block)
+        Spectrum.from_config(block)
 
 
 # ===========================================================================
@@ -1176,16 +1176,13 @@ def test_random_seed_is_applied_after_everything_is_built(monkeypatch):
     # spectrum that pre-draws). Seeded last, those draws are wiped out by the
     # seed; seeded first, they eat into the seeded stream and every run that
     # follows is shifted.
-    from gammaraytoys.sims import config as config_module
-
-    real_spectrum_from_config = config_module.spectrum_from_config
+    real_from_config = Spectrum.from_config
 
     def spectrum_from_config_that_draws(*args, **kwargs):
         np.random.uniform(size=3)
-        return real_spectrum_from_config(*args, **kwargs)
+        return real_from_config(*args, **kwargs)
 
-    monkeypatch.setattr(config_module, 'spectrum_from_config',
-                        spectrum_from_config_that_draws)
+    monkeypatch.setattr(Spectrum, 'from_config', spectrum_from_config_that_draws)
 
     config = dict(_minimal_detector_frame_config(), random_seed=2026)
 
