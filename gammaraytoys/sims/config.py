@@ -146,7 +146,6 @@ import numpy as np
 import yaml
 import astropy.units as u
 
-from ..coordinates import Cartesian2D
 from .config_utils import (_as_mapping, _boolean, _check_keys, _collapse,
                            _format_quantity, _integer, _number, _quantity,
                            _resolve_path, _searched_dir, _text, _type_name)
@@ -154,17 +153,13 @@ from .earth import Earth
 from .observation_strategy import (ZenithPointing, NadirPointing, InertialPointing,
                                    SpinPointing, TargetedPointing)
 from .reco import SimpleTraditionalReconstructor
-from .scaling import ConstantScaling, SourceScaling
-from .source import (PointSource, IsotropicSource, NearPointSource, ExtendedSource,
-                     EarthAlbedoSource)
+from .source import Source
 from .spacecraft_history import SpacecraftHistory
-from .spectrum import Spectrum
 
 
 __all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
            'earth_from_config', 'earth_to_config',
-           'source_from_config', 'source_to_config',
            'observation_strategy_from_config', 'observation_strategy_to_config',
            'reconstructor_from_config', 'reconstructor_to_config',
            'spacecraft_history_from_config',
@@ -424,403 +419,6 @@ def earth_to_config(earth):
     """
 
     return {'radius': _format_quantity(earth.radius)}
-
-
-# ---------------------------------------------------------------------------
-# Sources
-# ---------------------------------------------------------------------------
-
-
-#: Accepted spellings of every source type. Unlike spectra and scalings,
-#: sources are named by their class name in the plan's own sketch, and that
-#: is the only spelling accepted.
-_SOURCE_TYPES = {'PointSource': 'PointSource',
-                 'IsotropicSource': 'IsotropicSource',
-                 'NearPointSource': 'NearPointSource',
-                 'ExtendedSource': 'ExtendedSource',
-                 'EarthAlbedoSource': 'EarthAlbedoSource'}
-
-#: Keys every source block may carry, whatever its type.
-_COMMON_SOURCE_KEYS = ('name', 'type', 'spectrum', 'scaling',
-                       'chirality', 'chirality_degree')
-
-#: Extra keys, by source type.
-_SOURCE_KEYS = {'PointSource': ('offaxis_angle', 'sky_angle', 'flux',
-                                'flux_pivot', 'pivot_energy'),
-                'IsotropicSource': ('flux',),
-                'NearPointSource': ('position', 'rate'),
-                'ExtendedSource': ('sky_angle', 'width', 'flux'),
-                'EarthAlbedoSource': ('emissivity', 'law', 'emission_law')}
-
-
-def _position_from_config(block, where):
-    """
-    Read a near-field source's `position` block into a `Cartesian2D`.
-
-    ```yaml
-    position: {x: 0 cm, y: 1 cm}
-    ```
-
-    Parameters
-    ----------
-    block : dict
-        The source block, which must carry a `position` key.
-    where : str
-        Label for the source block in error messages.
-
-    Returns
-    -------
-    `Cartesian2D`
-
-    Raises
-    ------
-    ValueError
-        If `position` is missing, is not a block of `x` and `y`, or if
-        either coordinate is not a length.
-    """
-
-    if 'position' not in block:
-        raise ValueError(f"{where}: missing required key 'position'.")
-
-    inner_where = f"{where}.position"
-    inner = _as_mapping(block['position'], inner_where)
-    _check_keys(inner, inner_where, ('x', 'y'), required = ('x', 'y'))
-
-    return Cartesian2D(_quantity(inner, 'x', inner_where, u.cm, required = True),
-                       _quantity(inner, 'y', inner_where, u.cm, required = True))
-
-
-def _common_source_kwargs(block, where, base_dir = None):
-    """
-    Read the constructor arguments every source type shares.
-
-    Parameters
-    ----------
-    block : dict
-        The source block.
-    where : str
-        Label for this block in error messages.
-    base_dir : `pathlib.Path` or None
-        The directory a relative path inside the `scaling` block resolves
-        against. See `SourceScaling.from_config`.
-
-    Returns
-    -------
-    dict
-        `spectrum`, `scaling`, `chirality` and `chirality_degree`, ready to
-        be passed to any source constructor.
-
-    Raises
-    ------
-    ValueError
-        If `spectrum` is missing or bad, if the scaling is bad, or if
-        `chirality` is not `+1`/`-1` or `chirality_degree` is outside
-        `[0, 1]`.
-    """
-
-    if 'spectrum' not in block:
-        raise ValueError(f"{where}: missing required key 'spectrum'.")
-
-    spectrum = Spectrum.from_config(block['spectrum'], f"{where}.spectrum")
-
-    scaling = None
-    if 'scaling' in block:
-        scaling = SourceScaling.from_config(block['scaling'], f"{where}.scaling",
-                                            base_dir = base_dir)
-
-    chirality = _integer(block, 'chirality', where)
-
-    if chirality is not None and chirality not in (-1, 1):
-        raise ValueError(
-            f"{where}: key 'chirality' must be -1 or +1 (or left out, for no "
-            f"chirality preference), got {chirality}.")
-
-    return {'spectrum': spectrum,
-            'scaling': scaling,
-            'chirality': chirality,
-            'chirality_degree': _number(block, 'chirality_degree', where,
-                                        default = 0, minimum = 0, maximum = 1)}
-
-
-def source_from_config(config, where = 'source', earth = None, base_dir = None):
-    """
-    Build a `Source` from its configuration block.
-
-    ```yaml
-    name: crab                  # optional; labels this source's events
-    type: PointSource
-    sky_angle: 45 deg           # ... or offaxis_angle, never both
-    flux: 1e-3 1/(cm s)
-    spectrum: {type: PowerLaw, index: -2, min_energy: 0.2 MeV, max_energy: 10 MeV}
-    scaling: {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
-    ```
-
-    The five types and the keys each adds to the common ones (`name`,
-    `type`, `spectrum`, `scaling`, `chirality`, `chirality_degree`):
-
-    - `PointSource`: `offaxis_angle` **or** `sky_angle` -- exactly one, the
-      first putting the source at a fixed detector-frame angle and the
-      second on the inertial sky -- plus `flux`, or `flux_pivot` and
-      `pivot_energy` together, never both normalisations and never half
-      of the pivot pair. All three may be left out, which is a source
-      with no flux: it can be drawn from but not counted (see
-      `PointSource`).
-    - `IsotropicSource`: `flux`.
-    - `NearPointSource`: `position` (a block of `x` and `y`) and `rate`.
-    - `ExtendedSource`: `sky_angle`, `width` and `flux`.
-    - `EarthAlbedoSource`: `emissivity` and `law`
-      (`lambertian` or `isotropic`).
-
-    Parameters
-    ----------
-    config : mapping
-        The source block.
-    where : str
-        Label for this block in error messages.
-    earth : `Earth` or None
-        The Earth an `EarthAlbedoSource` emits from. `None` leaves the
-        source to build its own default `Earth()` -- which is astropy's
-        6378.1 km, *not* the 6371 km a configuration typically names, so
-        the top-level loader always passes the run's single Earth here
-        rather than letting a run end up with two different planets.
-    base_dir : `pathlib.Path` or None
-        The directory a relative path inside this source's `scaling` block
-        resolves against. See `SourceScaling.from_config`.
-
-    Returns
-    -------
-    `Source`
-
-    Raises
-    ------
-    ValueError
-        On an unknown type or key, a missing required key, a bad value, or
-        anything the source class itself rejects -- including a
-        `PointSource` given both `offaxis_angle` and `sky_angle` or
-        neither, whose own error is surfaced rather than replaced. Also
-        on a `PointSource` given `flux` beside the pivot pair, or only
-        one half of that pair, or a pivot pair whose `pivot_energy` lands
-        where the spectrum has zero probability density, which would
-        otherwise resolve to an infinite `flux`.
-    """
-
-    block = _as_mapping(config, where)
-    name = _type_name(block, where, _SOURCE_TYPES, 'source')
-
-    allowed = _COMMON_SOURCE_KEYS + _SOURCE_KEYS[name]
-    _check_keys(block, where, allowed)
-
-    kwargs = _common_source_kwargs(block, where, base_dir)
-
-    if name == 'PointSource':
-        if 'flux' in block and ('flux_pivot' in block or 'pivot_energy' in block):
-            raise ValueError(
-                f"{where}: a PointSource's normalisation is given either as "
-                f"'flux' or as 'flux_pivot' with 'pivot_energy', not both. "
-                f"`PointSource` prefers 'flux' and drops the pivot pair "
-                f"without saying so, and 'to_config' then writes the file "
-                f"back out with only the 'flux' in it.")
-
-        # The same silent wrong answer one step along: `flux_pivot` and
-        # `pivot_energy` are two halves of one number, and `PointSource`
-        # uses neither of them without the other. Given only one it leaves
-        # the flux unset rather than complaining, so the run draws from an
-        # unnormalised source and 'to_config' writes the file back out
-        # with the lone key gone.
-        if ('flux_pivot' in block) != ('pivot_energy' in block):
-            given = 'flux_pivot' if 'flux_pivot' in block else 'pivot_energy'
-            missing = 'pivot_energy' if given == 'flux_pivot' else 'flux_pivot'
-            raise ValueError(
-                f"{where}: a PointSource given {given!r} needs {missing!r} "
-                f"as well -- the two are halves of one normalisation, the "
-                f"differential flux and the energy it is quoted at, and "
-                f"`PointSource` uses neither without the other. Give both, "
-                f"or give 'flux' instead.")
-
-        # Both are read and both are passed on, even when one (or neither)
-        # is there: `PointSource` itself enforces "exactly one of the two",
-        # and its message is better than anything invented here.
-        kwargs['offaxis_angle'] = _quantity(block, 'offaxis_angle', where, u.deg)
-        kwargs['sky_angle'] = _quantity(block, 'sky_angle', where, u.deg)
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
-                                   minimum = 0)
-        kwargs['flux_pivot'] = _quantity(block, 'flux_pivot', where,
-                                         u.Unit('1 / (cm s keV)'), minimum = 0)
-        kwargs['pivot_energy'] = _quantity(block, 'pivot_energy', where, u.keV,
-                                           minimum = 0)
-
-        # A third silent wrong answer, one step past the pair being
-        # complete: `PointSource` divides `flux_pivot` by the spectrum's
-        # probability density at `pivot_energy`, and that density is
-        # exactly zero outside the spectrum's own energy range. The
-        # division still "succeeds" -- it just returns infinity, with
-        # nothing louder than a numpy warning that is easy to have
-        # suppressed -- and 'to_config' then writes `flux: inf ...` back
-        # into the file as if it were a deliberate value.
-        if kwargs['flux'] is None and kwargs['flux_pivot'] is not None:
-            spectrum = kwargs['spectrum']
-            pivot_energy = kwargs['pivot_energy']
-            pivot_density = spectrum.pdf(pivot_energy)
-            zero_density_error = ValueError(
-                f"{where}: key 'pivot_energy' = {pivot_energy} has zero "
-                f"probability density on this spectrum, so there is no "
-                f"total flux that 'flux_pivot' could correspond to. The "
-                f"spectrum's energy range is "
-                f"[{spectrum.min_energy}, {spectrum.max_energy}]; "
-                f"'pivot_energy' ordinarily needs to fall inside it "
-                f"(a `MultiComponentSpectrum` can still have zero "
-                f"density inside its overall range, in a gap none of "
-                f"its components cover).")
-
-            # Check the density itself before dividing by it, rather than
-            # dividing and then checking whether the result came out
-            # infinite: a zero density is exactly the condition being
-            # guarded against, and dividing by it first only earns a numpy
-            # RuntimeWarning on the way to the same error raised here.
-            if pivot_density == 0:
-                raise zero_density_error
-
-            resolved_flux = (kwargs['flux_pivot'] / pivot_density).to(u.Unit('1 / (cm s)'))
-
-            # Belt and braces: the zero-density check above is the only way
-            # this division was going wrong, but keep this in case some
-            # other route (a denormal density, say) still produces a
-            # non-finite flux.
-            if not np.isfinite(resolved_flux):
-                raise zero_density_error
-
-        source_class = PointSource
-
-    elif name == 'IsotropicSource':
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
-                                   minimum = 0)
-        source_class = IsotropicSource
-
-    elif name == 'NearPointSource':
-        kwargs['position'] = _position_from_config(block, where)
-        kwargs['rate'] = _quantity(block, 'rate', where, u.Unit('1 / s'),
-                                   minimum = 0)
-        source_class = NearPointSource
-
-    elif name == 'ExtendedSource':
-        kwargs['sky_angle'] = _quantity(block, 'sky_angle', where, u.deg,
-                                        required = True)
-        # No `minimum` on `width`: `ExtendedSource` demands a *strictly*
-        # positive one and says so much better than a bound here could
-        # ("for a source at a single exact direction use PointSource"), and
-        # its message already arrives with this block's `where` in front.
-        # The same goes for `EarthAlbedoSource`'s `emissivity` below.
-        kwargs['width'] = _quantity(block, 'width', where, u.deg, required = True)
-        kwargs['flux'] = _quantity(block, 'flux', where, u.Unit('1 / (cm s)'),
-                                   minimum = 0)
-        source_class = ExtendedSource
-
-    else:
-        if 'law' in block and 'emission_law' in block:
-            raise ValueError(
-                f"{where}: give either 'law' or 'emission_law', not both -- "
-                f"they are the same key. ('emission_law' is the spelling in "
-                f"the plan's Section 7 sketch; 'law' is the constructor "
-                f"argument and the canonical name here.)")
-
-        law_key = 'emission_law' if 'emission_law' in block else 'law'
-
-        kwargs['emissivity'] = _quantity(block, 'emissivity', where,
-                                         u.Unit('1 / (cm s)'), required = True)
-        kwargs['law'] = _text(block, law_key, where, default = 'lambertian',
-                              choices = ('lambertian', 'isotropic'))
-        kwargs['earth'] = earth
-        source_class = EarthAlbedoSource
-
-    try:
-        return source_class(**kwargs)
-    except Exception as err:
-        raise ValueError(f"{where}: {err}") from err
-
-
-def source_to_config(source, name = None):
-    """
-    Write a `Source` back out as a configuration block.
-
-    Parameters
-    ----------
-    source : `Source`
-        The source to describe.
-    name : str or None
-        The source's name, written as the block's `name` key when given.
-
-    Returns
-    -------
-    dict
-        A block `source_from_config` reads back into an equal source. Keys
-        left at their default -- no chirality, `chirality_degree` of 0, no
-        scaling, an unset flux or rate -- are left out, and a `PointSource`
-        given `flux_pivot`/`pivot_energy` comes back as the `flux` those
-        two resolved to.
-
-    Raises
-    ------
-    ValueError
-        If `source` is not one of the five types a configuration can name.
-    """
-
-    block = {}
-
-    if name is not None:
-        block['name'] = name
-
-    block['type'] = type(source).__name__
-
-    if block['type'] not in _SOURCE_TYPES:
-        raise ValueError(
-            f"{type(source).__name__} is not a source a configuration can "
-            f"describe; the types that are: "
-            f"{sorted(set(_SOURCE_TYPES.values()))}.")
-
-    if isinstance(source, PointSource):
-        if source.sky_angle is not None:
-            block['sky_angle'] = _format_quantity(source.sky_angle)
-        else:
-            block['offaxis_angle'] = _format_quantity(source.offaxis_angle)
-
-    elif isinstance(source, ExtendedSource):
-        block['sky_angle'] = _format_quantity(source.sky_angle)
-        block['width'] = _format_quantity(source.width)
-
-    elif isinstance(source, NearPointSource):
-        block['position'] = {'x': _format_quantity(source.position.x),
-                             'y': _format_quantity(source.position.y)}
-
-    elif isinstance(source, EarthAlbedoSource):
-        block['emissivity'] = _format_quantity(source.emissivity)
-        if source.law != 'lambertian':
-            block['law'] = source.law
-
-    if isinstance(source, NearPointSource):
-        if source.rate is not None:
-            block['rate'] = _format_quantity(source.rate)
-    elif not isinstance(source, EarthAlbedoSource):
-        # Every other far-field source carries an optional sky-integrated
-        # flux; the albedo carries an emissivity instead, and its flux is a
-        # function of the orbit rather than a free parameter.
-        flux = source.flux()
-        if flux is not None:
-            block['flux'] = _format_quantity(flux)
-
-    block['spectrum'] = source.spectrum.to_config()
-
-    scaling = source.scaling
-
-    if not (isinstance(scaling, ConstantScaling) and scaling.scale == 1.0):
-        block['scaling'] = scaling.to_config()
-
-    if source.chirality is not None:
-        block['chirality'] = int(source.chirality)
-
-    if source.chirality_degree != 0:
-        block['chirality_degree'] = float(source.chirality_degree)
-
-    return block
 
 
 # ---------------------------------------------------------------------------
@@ -1252,7 +850,7 @@ def _sources_from_config(config, where, earth, base_dir = None):
         string, if a name contains `'#'` (which `write_event_csv` refuses,
         because the reader would treat it as the start of a comment and
         silently drop the rest of the row), if two sources share a name, or
-        on anything `source_from_config` rejects.
+        on anything `Source.from_config` rejects.
     """
 
     if (not isinstance(config, Sequence) or isinstance(config, (str, bytes))
@@ -1273,7 +871,7 @@ def _sources_from_config(config, where, earth, base_dir = None):
         if isinstance(block.get('name'), str):
             label = f"{label} ({block['name']})"
 
-        source = source_from_config(block, label, earth, base_dir)
+        source = Source.from_config(block, label, earth, base_dir)
         sources.append(source)
 
         if 'name' in block:
@@ -1476,7 +1074,7 @@ def simulator_to_config(simulator):
 
     names = simulator.source_names or {}
 
-    config['sources'] = [source_to_config(source, names.get(source))
+    config['sources'] = [source.to_config(names.get(source))
                          for source in simulator.sources]
 
     return config

@@ -26,12 +26,11 @@ from gammaraytoys.sims import (
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
     MultiComponentSpectrum, NadirPointing, NearPointSource, PointSource,
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
-    SourceScaling, SpinPointing, Simulator, Spectrum, TabulatedScaling,
-    TargetedPointing, ZenithPointing,
+    Source, SourceScaling, SpinPointing, Simulator, Spectrum,
+    TabulatedScaling, TargetedPointing, ZenithPointing,
     detector_from_config, detector_to_config, earth_from_config, earth_to_config,
     load_config, observation_strategy_from_config, observation_strategy_to_config,
-    reconstructor_from_config, reconstructor_to_config, source_from_config,
-    source_to_config,
+    reconstructor_from_config, reconstructor_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
 # do on every astropy this project supports: parsing a bracketed list out of a
@@ -281,7 +280,7 @@ def test_scaling_unknown_key_raises():
 def test_pointsource_offaxis_form_round_trips():
     block = {'name': 'crab', 'type': 'PointSource', 'offaxis_angle': '30 deg',
              'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert isinstance(source, PointSource)
     assert source.sky_angle is None
@@ -294,28 +293,28 @@ def test_pointsource_offaxis_form_round_trips():
     assert flux.unit == u.Unit('1/(cm s)')
     assert flux.value == pytest.approx(1e-3)
 
-    out = source_to_config(source, name='crab')
+    out = source.to_config(name='crab')
     assert out['name'] == 'crab'
     assert out['type'] == 'PointSource'
     assert 'offaxis_angle' in out and 'sky_angle' not in out
 
-    source2 = source_from_config(out)
-    assert source_to_config(source2, name='crab') == out
+    source2 = Source.from_config(out)
+    assert source2.to_config(name='crab') == out
 
 
 def test_pointsource_sky_angle_form_round_trips():
     block = {'type': 'PointSource', 'sky_angle': '45 deg', 'flux': '1e-3 1/(cm s)',
              'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert source.offaxis_angle is None
     assert source.sky_angle == 45 * u.deg
 
-    out = source_to_config(source)
+    out = source.to_config()
     assert 'sky_angle' in out and 'offaxis_angle' not in out
 
-    source2 = source_from_config(out)
-    assert source_to_config(source2) == out
+    source2 = Source.from_config(out)
+    assert source2.to_config() == out
 
 
 def test_pointsource_flux_pivot_form_round_trips_to_a_flux():
@@ -339,20 +338,20 @@ def test_pointsource_flux_pivot_form_round_trips_to_a_flux():
             'min_energy': '1 MeV', 'max_energy': '10 MeV'}
     block = {'type': 'PointSource', 'sky_angle': '0 deg',
              'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '1 MeV', 'spectrum': spec}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     flux = source.flux()
     assert flux.to_value('1/(cm s)') == pytest.approx(9e-4)
 
-    # `source_to_config` writes the *resolved* flux, not flux_pivot/pivot_energy
+    # `to_config` writes the *resolved* flux, not flux_pivot/pivot_energy
     # (module docstring, "Round trips").
-    out = source_to_config(source)
+    out = source.to_config()
     assert 'flux' in out and 'flux_pivot' not in out
     assert 'pivot_energy' not in out
 
-    source2 = source_from_config(out)
+    source2 = Source.from_config(out)
     assert source2.flux().to_value('1/(cm s)') == pytest.approx(9e-4)
-    assert source_to_config(source2) == out
+    assert source2.to_config() == out
 
 
 def test_flux_pivot_with_a_monoenergetic_spectrum_is_refused():
@@ -366,89 +365,89 @@ def test_flux_pivot_with_a_monoenergetic_spectrum_is_refused():
              'spectrum': _spectrum_block('1 MeV')}
 
     with pytest.raises(ValueError, match='PDF'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_pointsource_both_forms_raises():
     block = {'type': 'PointSource', 'offaxis_angle': '10 deg', 'sky_angle': '20 deg',
              'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
     with pytest.raises(ValueError, match='exactly one'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_pointsource_neither_form_raises():
     block = {'type': 'PointSource', 'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
     with pytest.raises(ValueError, match='exactly one'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_isotropic_source_round_trips():
     block = {'type': 'IsotropicSource', 'flux': '2e-4 1/(cm s)', 'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
     assert isinstance(source, IsotropicSource)
 
-    out = source_to_config(source)
-    source2 = source_from_config(out)
-    assert source_to_config(source2) == out
+    out = source.to_config()
+    source2 = Source.from_config(out)
+    assert source2.to_config() == out
 
 
 def test_near_point_source_round_trips():
     block = {'type': 'NearPointSource', 'position': {'x': '0 cm', 'y': '1 cm'},
              'rate': '5 1/s', 'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert isinstance(source, NearPointSource)
     assert source.position.x == 0 * u.cm
     assert source.position.y == 1 * u.cm
     assert source.rate == 5 * u.Hz
 
-    out = source_to_config(source)
-    source2 = source_from_config(out)
-    assert source_to_config(source2) == out
+    out = source.to_config()
+    source2 = Source.from_config(out)
+    assert source2.to_config() == out
 
 
 def test_near_point_source_missing_position_raises():
     block = {'type': 'NearPointSource', 'rate': '5 1/s', 'spectrum': _spectrum_block()}
     with pytest.raises(ValueError, match='position'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_extended_source_round_trips():
     block = {'type': 'ExtendedSource', 'sky_angle': '10 deg', 'width': '5 deg',
              'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert isinstance(source, ExtendedSource)
     assert source.sky_angle == 10 * u.deg
     assert source.width == 5 * u.deg
 
-    out = source_to_config(source)
-    source2 = source_from_config(out)
-    assert source_to_config(source2) == out
+    out = source.to_config()
+    source2 = Source.from_config(out)
+    assert source2.to_config() == out
 
 
 def test_earth_albedo_source_lambertian_round_trips():
     block = {'type': 'EarthAlbedoSource', 'emissivity': '1e-4 1/(cm s)',
              'spectrum': _spectrum_block()}
-    source = source_from_config(block, earth=EARTH)
+    source = Source.from_config(block, earth=EARTH)
 
     assert isinstance(source, EarthAlbedoSource)
     assert source.law == 'lambertian'
     assert source.earth is EARTH
 
-    out = source_to_config(source)
+    out = source.to_config()
     assert 'law' not in out  # default, omitted (module docstring)
 
-    source2 = source_from_config(out, earth=EARTH)
-    assert source_to_config(source2) == out
+    source2 = Source.from_config(out, earth=EARTH)
+    assert source2.to_config() == out
 
 
 def test_earth_albedo_source_isotropic_law_round_trips():
     block = {'type': 'EarthAlbedoSource', 'emissivity': '1e-4 1/(cm s)',
              'law': 'isotropic', 'spectrum': _spectrum_block()}
-    source = source_from_config(block, earth=EARTH)
+    source = Source.from_config(block, earth=EARTH)
     assert source.law == 'isotropic'
-    assert source_to_config(source)['law'] == 'isotropic'
+    assert source.to_config()['law'] == 'isotropic'
 
 
 def test_earth_albedo_source_accepts_emission_law_alias():
@@ -456,7 +455,7 @@ def test_earth_albedo_source_accepts_emission_law_alias():
     # constructor argument (module docstring).
     block = {'type': 'EarthAlbedoSource', 'emissivity': '1e-4 1/(cm s)',
              'emission_law': 'isotropic', 'spectrum': _spectrum_block()}
-    source = source_from_config(block, earth=EARTH)
+    source = Source.from_config(block, earth=EARTH)
     assert source.law == 'isotropic'
 
 
@@ -464,30 +463,30 @@ def test_earth_albedo_source_law_and_emission_law_together_raises():
     block = {'type': 'EarthAlbedoSource', 'emissivity': '1e-4 1/(cm s)',
              'law': 'isotropic', 'emission_law': 'lambertian', 'spectrum': _spectrum_block()}
     with pytest.raises(ValueError, match='not both'):
-        source_from_config(block, earth=EARTH)
+        Source.from_config(block, earth=EARTH)
 
 
 def test_earth_albedo_source_rejects_bad_law():
     block = {'type': 'EarthAlbedoSource', 'emissivity': '1e-4 1/(cm s)',
              'law': 'bogus', 'spectrum': _spectrum_block()}
     with pytest.raises(ValueError):
-        source_from_config(block, earth=EARTH)
+        Source.from_config(block, earth=EARTH)
 
 
 def test_source_chirality_round_trips():
     block = {'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block(),
              'chirality': 1, 'chirality_degree': 0.7}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert source.chirality == 1
     assert source.chirality_degree == 0.7
 
-    out = source_to_config(source)
+    out = source.to_config()
     assert out['chirality'] == 1
     assert out['chirality_degree'] == 0.7
 
-    source2 = source_from_config(out)
-    assert source_to_config(source2) == out
+    source2 = Source.from_config(out)
+    assert source2.to_config() == out
 
 
 def test_source_scaling_is_written_back_out_by_to_config():
@@ -501,11 +500,11 @@ def test_source_scaling_is_written_back_out_by_to_config():
     block = {'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)',
              'spectrum': _spectrum_block(),
              'scaling': scaling_block}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert isinstance(source.scaling, TabulatedScaling)
 
-    out = source_to_config(source)
+    out = source.to_config()
     assert out['scaling'] == scaling_block
 
 
@@ -513,25 +512,25 @@ def test_a_non_default_constant_scaling_is_written_back_out_too():
     block = {'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)',
              'spectrum': _spectrum_block(),
              'scaling': {'type': 'Constant', 'scale': 0.25}}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
-    assert source_to_config(source)['scaling'] == {'type': 'Constant', 'scale': 0.25}
+    assert source.to_config()['scaling'] == {'type': 'Constant', 'scale': 0.25}
 
 
 def test_a_default_scaling_is_the_only_one_omitted_from_to_config():
     # The other side of the same decision: `ConstantScaling(1.0)` is what a
     # source with no `scaling` key gets, so writing it back out would be
     # noise. Anything else must survive.
-    source = source_from_config(_minimal_source_block())
+    source = Source.from_config(_minimal_source_block())
 
     assert isinstance(source.scaling, ConstantScaling)
     assert source.scaling.scale == 1.0
-    assert 'scaling' not in source_to_config(source)
+    assert 'scaling' not in source.to_config()
 
 
 def test_source_default_chirality_is_omitted_from_to_config():
-    source = source_from_config(_minimal_source_block())
-    out = source_to_config(source)
+    source = Source.from_config(_minimal_source_block())
+    out = source.to_config()
     assert 'chirality' not in out
     assert 'chirality_degree' not in out
 
@@ -540,24 +539,24 @@ def test_source_invalid_chirality_raises():
     block = dict(_minimal_source_block())
     block['chirality'] = 2
     with pytest.raises(ValueError, match='chirality'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_source_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown source type'):
-        source_from_config({'type': 'Blazar', 'spectrum': _spectrum_block()})
+        Source.from_config({'type': 'Blazar', 'spectrum': _spectrum_block()})
 
 
 def test_source_unknown_key_raises():
     block = dict(_minimal_source_block())
     block['bogus'] = 1
     with pytest.raises(ValueError, match='bogus'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_source_missing_spectrum_raises():
     with pytest.raises(ValueError, match='spectrum'):
-        source_from_config({'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)'})
+        Source.from_config({'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)'})
 
 
 # ===========================================================================
@@ -750,7 +749,7 @@ def test_malformed_unit_in_a_source_block_names_the_key_not_just_astropys_messag
     block = dict(_minimal_source_block())
     block['flux'] = '1e-3 parsecs'  # a unit, but not one convertible to 1/(cm s)
     with pytest.raises(ValueError, match='flux'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 # ===========================================================================
@@ -1243,7 +1242,7 @@ def test_flux_beside_flux_pivot_is_refused():
              'pivot_energy': '1 MeV', 'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='not both'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_flux_beside_pivot_energy_alone_is_refused():
@@ -1255,7 +1254,7 @@ def test_flux_beside_pivot_energy_alone_is_refused():
              'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='not both'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_flux_pivot_without_pivot_energy_is_refused():
@@ -1266,7 +1265,7 @@ def test_flux_pivot_without_pivot_energy_is_refused():
              'flux_pivot': '1e-6 1/(cm s keV)', 'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='pivot_energy'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_pivot_energy_without_flux_pivot_is_refused():
@@ -1274,7 +1273,7 @@ def test_pivot_energy_without_flux_pivot_is_refused():
              'pivot_energy': '1 MeV', 'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='flux_pivot'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_a_pointsource_with_no_normalization_at_all_is_still_allowed():
@@ -1283,13 +1282,13 @@ def test_a_pointsource_with_no_normalization_at_all_is_still_allowed():
     # normalization is refused.
     block = {'type': 'PointSource', 'sky_angle': '0 deg',
              'spectrum': _power_law_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert source.flux() is None
 
-    out = source_to_config(source)
+    out = source.to_config()
     assert 'flux' not in out
-    assert source_to_config(source_from_config(out)) == out
+    assert Source.from_config(out).to_config() == out
 
 
 def test_a_pivot_energy_where_the_spectrum_has_no_density_is_refused():
@@ -1304,7 +1303,7 @@ def test_a_pivot_energy_where_the_spectrum_has_no_density_is_refused():
              'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='zero'):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_the_refusal_names_the_energy_range_the_pivot_should_have_been_in():
@@ -1315,7 +1314,7 @@ def test_the_refusal_names_the_energy_range_the_pivot_should_have_been_in():
              'spectrum': _power_law_block()}
 
     with pytest.raises(ValueError, match='pivot_energy') as caught:
-        source_from_config(block)
+        Source.from_config(block)
 
     assert '1' in str(caught.value) and '10' in str(caught.value)
 
@@ -1333,7 +1332,7 @@ def test_a_pivot_energy_inside_the_range_is_still_fine():
     block = {'type': 'PointSource', 'sky_angle': '0 deg',
              'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '2 MeV',
              'spectrum': _power_law_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert source.flux().to_value('1/(cm s)') == pytest.approx(3.6e-3)
 
@@ -1352,7 +1351,7 @@ def test_a_negative_point_source_flux_is_refused_naming_the_key():
              'flux': '-1e-3 1/(cm s)', 'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match="'flux'") as caught:
-        source_from_config(block)
+        Source.from_config(block)
 
     assert '>= 0' in str(caught.value)
     # The offending value, so the reader can find the line.
@@ -1364,7 +1363,7 @@ def test_a_negative_isotropic_flux_is_refused():
              'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match="'flux'"):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_a_negative_extended_source_flux_is_refused():
@@ -1372,7 +1371,7 @@ def test_a_negative_extended_source_flux_is_refused():
              'flux': '-2e-4 1/(cm s)', 'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match="'flux'"):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_a_negative_flux_pivot_or_pivot_energy_is_refused():
@@ -1380,13 +1379,13 @@ def test_a_negative_flux_pivot_or_pivot_energy_is_refused():
                       'flux_pivot': '-1e-6 1/(cm s keV)', 'pivot_energy': '2 MeV',
                       'spectrum': _power_law_block()}
     with pytest.raises(ValueError, match="'flux_pivot'"):
-        source_from_config(negative_pivot)
+        Source.from_config(negative_pivot)
 
     negative_energy = {'type': 'PointSource', 'sky_angle': '0 deg',
                        'flux_pivot': '1e-6 1/(cm s keV)', 'pivot_energy': '-2 MeV',
                        'spectrum': _power_law_block()}
     with pytest.raises(ValueError, match="'pivot_energy'"):
-        source_from_config(negative_energy)
+        Source.from_config(negative_energy)
 
 
 def test_a_negative_near_point_source_rate_is_refused():
@@ -1394,7 +1393,7 @@ def test_a_negative_near_point_source_rate_is_refused():
              'rate': '-3 1/s', 'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match="'rate'"):
-        source_from_config(block)
+        Source.from_config(block)
 
 
 def test_a_zero_flux_is_still_allowed():
@@ -1403,7 +1402,7 @@ def test_a_zero_flux_is_still_allowed():
     # well-defined Poisson mean.
     block = {'type': 'IsotropicSource', 'flux': '0 1/(cm s)',
              'spectrum': _spectrum_block()}
-    source = source_from_config(block)
+    source = Source.from_config(block)
 
     assert source.flux().to_value('1/(cm s)') == 0.0
 
@@ -1445,7 +1444,7 @@ def test_a_negative_width_keeps_extended_sources_own_better_message():
              'flux': '2e-4 1/(cm s)', 'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match='PointSource') as caught:
-        source_from_config(block)
+        Source.from_config(block)
 
     assert 'strictly positive' in str(caught.value)
 
@@ -1455,7 +1454,7 @@ def test_a_negative_emissivity_keeps_earth_albedos_own_better_message():
              'spectrum': _spectrum_block()}
 
     with pytest.raises(ValueError, match='strictly positive') as caught:
-        source_from_config(block, earth=EARTH)
+        Source.from_config(block, earth=EARTH)
 
     assert 'drop the source' in str(caught.value)
 
@@ -1502,14 +1501,14 @@ def test_a_mistyped_key_is_suggested():
 
 def test_a_mistyped_type_is_suggested():
     with pytest.raises(ValueError, match="Did you mean 'PointSource'"):
-        source_from_config({'type': 'PointSorce', 'sky_angle': '0 deg',
+        Source.from_config({'type': 'PointSorce', 'sky_angle': '0 deg',
                             'flux': '1e-3 1/(cm s)',
                             'spectrum': _spectrum_block()})
 
 
 def test_a_mistyped_choice_is_suggested():
     with pytest.raises(ValueError, match="Did you mean 'isotropic'"):
-        source_from_config({'type': 'EarthAlbedoSource',
+        Source.from_config({'type': 'EarthAlbedoSource',
                             'emissivity': '1e-4 1/(cm s)', 'law': 'isotropci',
                             'spectrum': _spectrum_block()}, earth=EARTH)
 
