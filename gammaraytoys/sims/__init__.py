@@ -15,5 +15,4 @@ from .scaling import (SourceScaling, ConstantScaling, TabulatedScaling,
 from .spacecraft_history import SpacecraftHistory, SpacecraftInterval
 from .observation_strategy import (ObservationStrategy, ZenithPointing, NadirPointing,
                                    InertialPointing, SpinPointing, TargetedPointing)
-from .config import (load_config,
-                     simulator_from_config, simulator_to_config)
+from .config import load_config

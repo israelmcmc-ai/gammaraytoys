@@ -2,7 +2,6 @@ from astropy import units as u
 import numpy as np
 from .source import Source
 from .simulator_base import SimulatorBase
-from .config import simulator_from_config, simulator_to_config
 from tqdm import tqdm
 
 class Simulator(SimulatorBase):
@@ -70,10 +69,12 @@ class Simulator(SimulatorBase):
         given a `sky_angle` re-aims itself on every draw, so handing one
         source to two runs would let them interfere.
 
-        The schema is documented in `gammaraytoys.sims.config`, whose
-        `*_from_config` functions build each piece and whose `*_to_config`
-        functions write them back out. Unknown keys are an error at every
-        level, and a malformed unit raises naming the key it came from.
+        The schema is documented in `gammaraytoys.sims.config`, and each
+        piece of it is read and written by the class it describes -- a
+        `from_config` classmethod and a `to_config` method on `Source`,
+        `Spectrum`, `SourceScaling` and the rest. Unknown keys are an error
+        at every level, and a malformed unit raises naming the key it came
+        from.
 
         A detector-frame run has no spacecraft, so a configuration holding
         a `spacecraft_history` is refused here rather than silently
@@ -104,7 +105,7 @@ class Simulator(SimulatorBase):
             If `config` is neither a path nor a mapping.
         """
 
-        return simulator_from_config(cls, config, inertial = False)
+        return cls._from_config(config, inertial = False)
 
     def to_config(self):
         """
@@ -135,7 +136,7 @@ class Simulator(SimulatorBase):
             can name.
         """
 
-        return simulator_to_config(self)
+        return self._to_config()
 
     def _standardize_termination(self, nsim = None, ntrig = None, duration = None):
         """
