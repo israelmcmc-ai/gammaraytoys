@@ -828,6 +828,29 @@ _EXPRESSION_UNARY_OPS = (ast.UAdd, ast.USub)
 #: writes it itself is rejected by the whitelist, long before the rewrite.
 _POW_NAME = '_pow'
 
+#: The longest expression a configuration file may hold, checked before it
+#: is parsed.
+#:
+#: Two costs survive everything else on this page, and one rule bounds
+#: both, because both are paid for one character at a time.
+#:
+#: Integers are still arbitrary precision under `*` -- only `**` was taken
+#: away, by `_pow` -- so `9999...*9999...*...` builds an integer as large
+#: as the file is long, at quadratic cost: 200 four-thousand-digit factors
+#: are 781 kB of YAML and 1.5 seconds of CPU for a 2.7-million-bit number.
+#: And `_check_expression_node` and `_FloatPower.visit` both recurse once
+#: per node, so a long chain of anything -- `-------...-1`, `2*2*2*...`
+#: -- runs the interpreter out of stack and raises `RecursionError`, which
+#: is not the `ValueError` this class documents.
+#:
+#: 250 characters, and not the rounder 1000, because the recursion is the
+#: tighter of the two constraints: 496 characters of `-` are already
+#: enough to exhaust CPython's default 1000-frame stack, so a cap has to
+#: sit well below that to be worth having. It is still generous for what
+#: it bounds -- a scaling is a one-liner, and the plan's own example,
+#: `1 + 0.5*sin(2*pi*t/5400)`, is 24 characters.
+_MAX_EXPRESSION_LENGTH = 250
+
 
 def _reject(expression, reason):
     """
@@ -1082,6 +1105,13 @@ class TimeExpression:
     `__builtins__` emptied. The rewrite has to come *before* the compile,
     because the compiler folds constant arithmetic itself and would
     happily build the huge integer on our behalf.
+
+    One thing is left over once `**` is a float, and it is dealt with
+    first of all, before the expression is even parsed: the expression may
+    be at most `_MAX_EXPRESSION_LENGTH` characters long. Multiplying long
+    integer literals still grows an exact integer, and every walk over the
+    tree recurses once per node, so both the arithmetic and the walker are
+    bounded by bounding the length. See `_MAX_EXPRESSION_LENGTH`.
     """
 
     def __init__(self, expression):
@@ -1094,14 +1124,27 @@ class TimeExpression:
         Raises
         ------
         ValueError
-            If `expression` is not a string, is not valid Python syntax, or
-            uses anything outside the whitelist (see the class docstring).
+            If `expression` is not a string, is longer than
+            `_MAX_EXPRESSION_LENGTH` characters, is not valid Python
+            syntax, or uses anything outside the whitelist (see the class
+            docstring).
         """
 
         if not isinstance(expression, str):
             raise ValueError(
                 "an expression must be a string, got "
                 f"{type(expression).__name__} ({expression!r}).")
+
+        if len(expression) > _MAX_EXPRESSION_LENGTH:
+            # Before `ast.parse`, because parsing is itself one of the two
+            # things this bounds; see `_MAX_EXPRESSION_LENGTH`. The
+            # expression is not repeated back, unlike every other
+            # rejection here: it is by definition too long to read.
+            raise ValueError(
+                f"an expression may be at most {_MAX_EXPRESSION_LENGTH} "
+                f"characters long, and this one is {len(expression)}. It is "
+                f"not shown here, being far too long to read in an error "
+                f"message.")
 
         if '__' in expression:
             # Belt and braces: everything this catches is already caught by
