@@ -512,8 +512,20 @@ class SourceScaling(ABC):
 
 class ConstantScaling(SourceScaling): ...             # default, 1.0
 class TabulatedScaling(SourceScaling): ...            # piecewise constant
-class FunctionScaling(SourceScaling): ...             # wraps any callable
+class BurstScaling(SourceScaling): ...                # a single on/off window
+class SinusoidalScaling(SourceScaling): ...           # smooth modulation
 ```
+
+`BurstScaling(start, duration, amplitude = 1.0)` is `amplitude` on the **half-open**
+window `start <= t < start + duration` and `0.0` outside it — half-open so that it
+agrees with `TabulatedScaling`, which already gives a breakpoint to the row *at* it.
+
+`SinusoidalScaling(mean, amplitude, period, reference_time = 0 s)` is
+`mean + amplitude * sin(2 π (t - reference_time) / period)`, spelled with the **full
+period** rather than an angular frequency so no caller has to get a factor of `2 π`
+right. It refuses `amplitude > mean` at construction: such an oscillation is negative
+for part of every cycle, i.e. a negative Poisson mean in §6, and construction is where
+the two numbers that disagree are both in hand.
 
 `TabulatedScaling.open(filename)` reads a two-column CSV, `time_s,scale`, interpreted
 **piecewise constant** to match `.ori` interval semantics: the scale from the last row
@@ -713,7 +725,7 @@ sources:
     sky_angle: 45 deg
     flux: 1e-3 1/(cm s)
     spectrum: {type: PowerLaw, index: -2, min_energy: 0.2 MeV, max_energy: 10 MeV}
-    scaling: {type: Function, expression: "1 + 0.5*sin(2*pi*t/5400)"}
+    scaling: {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
   - name: albedo
     type: EarthAlbedoSource
     emission_law: lambertian
@@ -725,14 +737,20 @@ Every unit-bearing value is a string astropy parses. Unknown keys are an error, 
 warning — a silently ignored typo in a config file is a debugging nightmare. Validate
 by hand with clear messages; do not add a schema-validation dependency.
 
-`FunctionScaling` from a config string is the one place with an obvious injection
-hazard. Do **not** use bare `eval`. Restrict the namespace to `t` plus an explicit
-whitelist of numpy functions and constants, and reject anything containing `__`.
+An earlier draft of this section let a `scaling` carry a free-form expression in `t`,
+which the loader evaluated — an obvious injection hazard, and one that took an AST
+whitelist and a few hundred lines of `config.py` to survive. The maintainer's decision
+during PR 7's review was to **remove the free-form expression rather than guard it**:
+the schema names only the fixed, parameterised scalings of §5.7, every argument of
+which is a number or a quantity, so a config file holds nothing to evaluate and there
+is no injection surface to defend. A shape none of them can make belongs in a
+`Tabulated` scaling's CSV, or in Python.
 
-*Tests*: every source and spectrum type round-trips config → object → config;
+*Tests*: every source, spectrum and scaling type round-trips config → object → config;
 `random_seed` makes two runs byte-identical; unknown keys raise; a malformed unit
-raises with a message naming the offending key; the expression evaluator rejects
-`__import__` and friends.
+raises with a message naming the offending key; a `Sinusoidal` whose `amplitude`
+exceeds its `mean`, and a `Burst` of non-positive `duration`, raise naming the key
+they came from.
 
 *Notebook*: `06-full_simulation_from_yaml.ipynb` — the capstone, running everything
 from a single file.
