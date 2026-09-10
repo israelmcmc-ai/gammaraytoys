@@ -38,7 +38,7 @@ from gammaraytoys.sims import (
 # string is a recent feature, and `pyproject.toml` pins no version. The library
 # parses that form itself for exactly this reason, so the three assertions
 # below that read one back use the same parser rather than `u.Quantity`.
-from gammaraytoys.sims.config import _parse_quantity
+from gammaraytoys.sims.config_utils import _parse_quantity
 
 
 # ===========================================================================
