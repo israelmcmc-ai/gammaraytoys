@@ -29,7 +29,6 @@ from gammaraytoys.sims import (
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
     Source, SourceScaling, SpinPointing, Simulator, Spectrum,
     TabulatedScaling, TargetedPointing, ZenithPointing,
-    detector_from_config, detector_to_config,
     load_config, reconstructor_from_config, reconstructor_to_config,
 )
 # Reading an array-with-unit string back is the one thing `u.Quantity` cannot
@@ -38,6 +37,7 @@ from gammaraytoys.sims import (
 # parses that form itself for exactly this reason, so the three assertions
 # below that read one back use the same parser rather than `u.Quantity`.
 from gammaraytoys.sims.config_utils import _parse_quantity
+from gammaraytoys.detectors import ToyTracker2D
 
 
 # ===========================================================================
@@ -631,38 +631,38 @@ def test_observation_strategy_unknown_key_raises():
 # ===========================================================================
 
 def test_detector_round_trips():
-    detector = detector_from_config(DETECTOR_BLOCK)
+    detector = ToyTracker2D.from_config(DETECTOR_BLOCK)
 
-    out = detector_to_config(detector)
+    out = detector.to_config()
     assert out['material'] == 'Ge'
     assert u.Quantity(out['layer_length']) == 16 * u.cm
     assert u.Quantity(out['layer_thickness']) == 5 * u.mm
     assert out['energy_resolution'] == 0.01
     assert u.Quantity(out['energy_threshold']) == 20 * u.keV
 
-    detector2 = detector_from_config(out)
-    assert detector_to_config(detector2) == out
+    detector2 = ToyTracker2D.from_config(out)
+    assert detector2.to_config() == out
 
 
 def test_detector_missing_key_raises():
     block = dict(DETECTOR_BLOCK)
     del block['layer_length']
     with pytest.raises(ValueError, match='layer_length'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_detector_unknown_key_raises():
     block = dict(DETECTOR_BLOCK)
     block['bogus'] = 1
     with pytest.raises(ValueError, match='bogus'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_detector_unknown_type_raises():
     block = dict(DETECTOR_BLOCK)
     block['type'] = 'ToyTracker3D'
     with pytest.raises(ValueError, match='unknown detector type'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_earth_round_trips():
@@ -719,21 +719,21 @@ def test_malformed_unit_names_the_offending_key():
     block = dict(DETECTOR_BLOCK)
     block['layer_length'] = '16 banana'
     with pytest.raises(ValueError, match='layer_length'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_wrong_physical_type_unit_names_the_offending_key():
     block = dict(DETECTOR_BLOCK)
     block['layer_length'] = '16 kg'  # mass, not length
     with pytest.raises(ValueError, match='layer_length'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_bare_number_without_unit_names_the_offending_key():
     block = dict(DETECTOR_BLOCK)
     block['layer_length'] = 16  # no unit string at all
     with pytest.raises(ValueError, match='layer_length'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_unquoted_yaml_list_with_unit_names_the_offending_key():
@@ -742,7 +742,7 @@ def test_unquoted_yaml_list_with_unit_names_the_offending_key():
     block = dict(DETECTOR_BLOCK)
     block['layer_positions'] = [30, 0, 1]  # a real YAML list, not a string
     with pytest.raises(ValueError, match='layer_positions'):
-        detector_from_config(block)
+        ToyTracker2D.from_config(block)
 
 
 def test_malformed_unit_in_a_source_block_names_the_key_not_just_astropys_message():
@@ -905,7 +905,7 @@ def test_quoting_the_sketchs_array_line_fixes_it():
     positions = '[30, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9] cm'
     block = dict(DETECTOR_BLOCK, layer_positions=positions,
                  layer_thickness='5 mm')
-    detector = detector_from_config(block)
+    detector = ToyTracker2D.from_config(block)
 
     assert detector.layer_positions.unit == u.cm
     assert list(detector.layer_positions.to_value(u.cm)) == [30, 0, 1, 2, 3, 4,
@@ -960,7 +960,7 @@ def test_load_config_does_not_mutate_the_callers_mapping():
 # ===========================================================================
 
 def test_to_config_on_hand_built_inertial_simulator_raises():
-    detector = detector_from_config(DETECTOR_BLOCK)
+    detector = ToyTracker2D.from_config(DETECTOR_BLOCK)
     earth = Earth(radius=6371 * u.km)
     history = SpacecraftHistory.from_elliptical_orbit(
         semi_major_axis=6771 * u.km, duration=100 * u.s, time_step=50 * u.s, earth=earth)
@@ -980,7 +980,7 @@ def test_to_config_on_hand_built_detector_frame_simulator_does_not_raise():
     # `to_config` on one built directly succeeds -- it just has no source
     # names to write, which is a legitimate state (an unnamed source), not
     # a guess.
-    detector = detector_from_config(DETECTOR_BLOCK)
+    detector = ToyTracker2D.from_config(DETECTOR_BLOCK)
     source = IsotropicSource(spectrum=MonoenergeticSpectrum(1 * u.MeV),
                              flux=1e-3 * u.Unit('1/(cm s)'))
     simulator = Simulator(detector=detector, sources=[source],
@@ -1686,7 +1686,7 @@ def test_a_targeted_pointing_in_a_full_config_round_trips():
 # Part R -- a genuinely per-layer detector round-trips layer by layer
 # ===========================================================================
 #
-# `detector_to_config` collapses a per-layer array back to the single value it
+# `ToyTracker2D.to_config` collapses a per-layer array back to the single value it
 # was written as, so a configuration that gave one number reads back as one
 # number rather than six copies of it. Every detector in this file until now
 # gave one number, which means a collapse that threw the other five away
@@ -1709,9 +1709,9 @@ PER_LAYER_DETECTOR_BLOCK = {
 
 
 def test_a_per_layer_detector_keeps_every_layers_own_value():
-    detector = detector_from_config(PER_LAYER_DETECTOR_BLOCK)
+    detector = ToyTracker2D.from_config(PER_LAYER_DETECTOR_BLOCK)
 
-    out = detector_to_config(detector)
+    out = detector.to_config()
 
     # Layer by layer, and in order: a detector written back out with only its
     # first layer's numbers would be a different instrument.
@@ -1724,11 +1724,11 @@ def test_a_per_layer_detector_keeps_every_layers_own_value():
 
 
 def test_a_per_layer_detector_round_trips():
-    detector = detector_from_config(PER_LAYER_DETECTOR_BLOCK)
-    out1 = detector_to_config(detector)
+    detector = ToyTracker2D.from_config(PER_LAYER_DETECTOR_BLOCK)
+    out1 = detector.to_config()
 
-    detector2 = detector_from_config(out1)
-    out2 = detector_to_config(detector2)
+    detector2 = ToyTracker2D.from_config(out1)
+    out2 = detector2.to_config()
 
     assert out1 == out2
 

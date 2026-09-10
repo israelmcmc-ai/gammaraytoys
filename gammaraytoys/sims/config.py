@@ -146,9 +146,9 @@ import numpy as np
 import yaml
 import astropy.units as u
 
-from .config_utils import (_as_mapping, _boolean, _check_keys, _collapse,
-                           _format_quantity, _integer, _number, _quantity,
-                           _resolve_path, _searched_dir, _text, _type_name)
+from .config_utils import (_as_mapping, _boolean, _check_keys, _format_quantity,
+                           _integer, _number, _quantity, _resolve_path,
+                           _searched_dir, _text, _type_name)
 from .earth import Earth
 from .observation_strategy import ObservationStrategy
 from .reco import SimpleTraditionalReconstructor
@@ -157,7 +157,6 @@ from .spacecraft_history import SpacecraftHistory
 
 
 __all__ = ['load_config',
-           'detector_from_config', 'detector_to_config',
            'reconstructor_from_config', 'reconstructor_to_config',
            'spacecraft_history_from_config',
            'simulator_from_config', 'simulator_to_config']
@@ -234,129 +233,6 @@ def _config_base_dir(config):
         return Path(config).parent
 
     return None
-
-
-# ---------------------------------------------------------------------------
-# Detector and Earth
-# ---------------------------------------------------------------------------
-
-
-#: Accepted spellings of every detector type, mapped to the canonical one.
-_DETECTOR_TYPES = {'ToyTracker2D': 'ToyTracker2D'}
-
-_DETECTOR_KEYS = ('type', 'material', 'layer_length', 'layer_positions',
-                  'layer_thickness', 'energy_resolution', 'energy_threshold')
-
-
-def detector_from_config(config, where = 'detector'):
-    """
-    Build a detector from its configuration block.
-
-    ```yaml
-    type: ToyTracker2D
-    material: Ge
-    layer_length: 16 cm
-    layer_positions: "[30, 0, 1, 2] cm"
-    layer_thickness: 5 mm       # scalar, or one entry per layer
-    energy_resolution: 0.01     # plain number, or one per layer
-    energy_threshold: 20 keV    # scalar, or one per layer
-    ```
-
-    Every key is required: `ToyTracker2D` has no defaults of its own, and
-    guessing one here would put a number in the detector that is nowhere in
-    the file.
-
-    Parameters
-    ----------
-    config : mapping
-        The `detector` block.
-    where : str
-        Label for this block in error messages.
-
-    Returns
-    -------
-    `ToyTracker2D`
-
-    Raises
-    ------
-    ValueError
-        On an unknown or missing key, an unparseable or wrong-unit value,
-        an unknown material, or anything the detector itself rejects
-        (overlapping layers, a per-layer array of the wrong length).
-    """
-
-    # Imported here, not at module level: `gammaraytoys.detectors` imports
-    # `gammaraytoys.sims` for `Photon`, so a module-level import would close
-    # a cycle and break `import gammaraytoys` outright.
-    from ..detectors import ToyTracker2D
-
-    block = _as_mapping(config, where)
-    _check_keys(block, where, _DETECTOR_KEYS, required = _DETECTOR_KEYS)
-    _type_name(block, where, _DETECTOR_TYPES, 'detector')
-
-    material = _text(block, 'material', where, required = True)
-
-    kwargs = dict(
-        material = material,
-        layer_length = _quantity(block, 'layer_length', where, u.cm, required = True),
-        layer_positions = _quantity(block, 'layer_positions', where, u.cm,
-                                    required = True, shape = 'array'),
-        layer_thickness = _quantity(block, 'layer_thickness', where, u.cm,
-                                    required = True, shape = 'any'),
-        energy_resolution = _number(block, 'energy_resolution', where,
-                                    required = True, minimum = 0, shape = 'any'),
-        energy_threshold = _quantity(block, 'energy_threshold', where, u.keV,
-                                     required = True, shape = 'any'))
-
-    try:
-        return ToyTracker2D(**kwargs)
-    except Exception as err:
-        raise ValueError(
-            f"{where}: could not build a ToyTracker2D from this block "
-            f"({type(err).__name__}: {err}).") from err
-
-
-def detector_to_config(detector):
-    """
-    Write a detector back out as a configuration block.
-
-    Parameters
-    ----------
-    detector : `ToyTracker2D`
-        The detector to describe.
-
-    Returns
-    -------
-    dict
-        A block `detector_from_config` reads back into an equal detector.
-        Per-layer values that are the same on every layer are collapsed to
-        the single value they were written as.
-
-    Raises
-    ------
-    ValueError
-        If the detector's material was built directly rather than by name,
-        and so has no name to write.
-    """
-
-    material = getattr(detector.material, 'name', None)
-
-    if material is None:
-        raise ValueError(
-            "this detector's material was built directly from a density and "
-            "an attenuation table rather than by name, so there is no material "
-            "name to write into a configuration.")
-
-    resolution = _collapse(np.asarray(detector.energy_resolution))
-
-    return {'type': 'ToyTracker2D',
-            'material': material,
-            'layer_length': _format_quantity(detector.size),
-            'layer_positions': _format_quantity(detector.layer_positions),
-            'layer_thickness': _format_quantity(_collapse(detector.layer_thickness)),
-            'energy_resolution': (float(resolution) if np.ndim(resolution) == 0
-                                  else [float(item) for item in resolution]),
-            'energy_threshold': _format_quantity(_collapse(detector.energy_threshold))}
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +640,12 @@ def simulator_from_config(cls, config, inertial):
     earth = (Earth.from_config(block['earth'], f"{where}.earth")
              if 'earth' in block else Earth())
 
-    detector = detector_from_config(block['detector'], f"{where}.detector")
+    # Imported here, not at module level: `gammaraytoys.detectors` imports
+    # `gammaraytoys.sims` for `Photon`, so a module-level import would close
+    # a cycle and break `import gammaraytoys` outright.
+    from ..detectors import ToyTracker2D
+
+    detector = ToyTracker2D.from_config(block['detector'], f"{where}.detector")
 
     reconstructor = (reconstructor_from_config(block['reconstructor'],
                                                f"{where}.reconstructor")
@@ -844,7 +725,7 @@ def simulator_to_config(simulator):
         from.
     """
 
-    config = {'detector': detector_to_config(simulator.detector)}
+    config = {'detector': simulator.detector.to_config()}
 
     earth = getattr(simulator, 'earth', None)
 

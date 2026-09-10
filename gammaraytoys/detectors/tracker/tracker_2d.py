@@ -4,6 +4,9 @@ import numpy as np
 from gammaraytoys import Material
 from astropy import units as u
 from gammaraytoys.sims import Photon, Compton, Absorption
+from gammaraytoys.sims.config_utils import (_as_mapping, _check_keys, _collapse,
+                                            _format_quantity, _number, _quantity,
+                                            _text, _type_name)
 from gammaraytoys.physics import ComptonPhysics2D
 from gammaraytoys.coordinates import Cartesian2D
 from scipy.stats import norm, expon
@@ -73,7 +76,109 @@ class ToyTracker2D:
 
         if np.any(gaps < 0):
             raise ValueError("Overlaps detected. Increase the space between layers or make them thinner.")
-        
+
+    @classmethod
+    def from_config(cls, config, where = 'detector'):
+        """
+        Build a detector from its configuration block.
+
+        ```yaml
+        type: ToyTracker2D
+        material: Ge
+        layer_length: 16 cm
+        layer_positions: "[30, 0, 1, 2] cm"
+        layer_thickness: 5 mm       # scalar, or one entry per layer
+        energy_resolution: 0.01     # plain number, or one per layer
+        energy_threshold: 20 keV    # scalar, or one per layer
+        ```
+
+        Every key is required: `ToyTracker2D` has no defaults of its own, and
+        guessing one here would put a number in the detector that is nowhere in
+        the file.
+
+        Parameters
+        ----------
+        config : mapping
+            The `detector` block.
+        where : str
+            Label for this block in error messages.
+
+        Returns
+        -------
+        `ToyTracker2D`
+
+        Raises
+        ------
+        ValueError
+            On an unknown or missing key, an unparseable or wrong-unit value,
+            an unknown material, or anything the detector itself rejects
+            (overlapping layers, a per-layer array of the wrong length).
+        """
+
+        block = _as_mapping(config, where)
+        _check_keys(block, where, _DETECTOR_KEYS, required = _DETECTOR_KEYS)
+        _type_name(block, where, _DETECTOR_TYPES, 'detector')
+
+        material = _text(block, 'material', where, required = True)
+
+        kwargs = dict(
+            material = material,
+            layer_length = _quantity(block, 'layer_length', where, u.cm, required = True),
+            layer_positions = _quantity(block, 'layer_positions', where, u.cm,
+                                        required = True, shape = 'array'),
+            layer_thickness = _quantity(block, 'layer_thickness', where, u.cm,
+                                        required = True, shape = 'any'),
+            energy_resolution = _number(block, 'energy_resolution', where,
+                                        required = True, minimum = 0, shape = 'any'),
+            energy_threshold = _quantity(block, 'energy_threshold', where, u.keV,
+                                         required = True, shape = 'any'))
+
+        try:
+            return cls(**kwargs)
+        except Exception as err:
+            raise ValueError(
+                f"{where}: could not build a ToyTracker2D from this block "
+                f"({type(err).__name__}: {err}).") from err
+    def to_config(self):
+        """
+        Write this detector back out as a configuration block.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A block `ToyTracker2D.from_config` reads back into an equal
+            detector. Per-layer values that are the same on every layer are
+            collapsed to the single value they were written as.
+
+        Raises
+        ------
+        ValueError
+            If the detector's material was built directly rather than by name,
+            and so has no name to write.
+        """
+
+        material = getattr(self.material, 'name', None)
+
+        if material is None:
+            raise ValueError(
+                "this self's material was built directly from a density and "
+                "an attenuation table rather than by name, so there is no material "
+                "name to write into a configuration.")
+
+        resolution = _collapse(np.asarray(self.energy_resolution))
+
+        return {'type': 'ToyTracker2D',
+                'material': material,
+                'layer_length': _format_quantity(self.size),
+                'layer_positions': _format_quantity(self.layer_positions),
+                'layer_thickness': _format_quantity(_collapse(self.layer_thickness)),
+                'energy_resolution': (float(resolution) if np.ndim(resolution) == 0
+                                      else [float(item) for item in resolution]),
+                'energy_threshold': _format_quantity(_collapse(self.energy_threshold))}
     @property
     def nlayers(self):
         return self._layer_pos.size
@@ -423,7 +528,15 @@ class ToyTracker2D:
         return particle
 
 
+# ---------------------------------------------------------------------------
+# What a configuration may call this class, and which of its keys it may
+# carry (`docs/dev/inertial_sim_plan.md`, Section 7). Read by
+# `ToyTracker2D.from_config` above.
+# ---------------------------------------------------------------------------
 
 
+#: Accepted spellings of every detector type, mapped to the canonical one.
+_DETECTOR_TYPES = {'ToyTracker2D': 'ToyTracker2D'}
 
-
+_DETECTOR_KEYS = ('type', 'material', 'layer_length', 'layer_positions',
+                  'layer_thickness', 'energy_resolution', 'energy_threshold')
