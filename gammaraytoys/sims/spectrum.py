@@ -166,6 +166,16 @@ class MultiComponentSpectrum(Spectrum):
 
     def random_energy(self, size = None):
 
+        if size is None:
+            # One photon, one scalar -- the same shape MonoenergeticSpectrum
+            # and PowerLawSpectrum return, and what the simulators expect of
+            # any spectrum. The array path below works by grouping the draws
+            # by component, and a group of one is still an array of one: it
+            # cannot produce a scalar, so a single draw is its own case.
+            component = np.random.choice(self.ncomponents, p = self.weights)
+
+            return self.components[component].random_energy()
+
         component_idx = np.random.choice(self.ncomponents, size = size, p = self.weights)
 
         energies = []
