@@ -22,7 +22,7 @@ import astropy.units as u
 from astropy.constants import R_earth
 
 from gammaraytoys.sims import (
-    ConstantScaling, Earth, EarthAlbedoSource, ExtendedSource, FunctionScaling,
+    ConstantScaling, Earth, EarthAlbedoSource, ExtendedSource,
     InertialPointing, InertialSimulator, IsotropicSource, MonoenergeticSpectrum,
     MultiComponentSpectrum, NadirPointing, NearPointSource, PointSource,
     PowerLawSpectrum, SimpleTraditionalReconstructor, SpacecraftHistory,
@@ -263,23 +263,6 @@ def test_tabulated_scaling_neither_file_nor_inline_raises():
         scaling_from_config({'type': 'Tabulated'})
 
 
-def test_function_scaling_round_trips_expression_exactly():
-    expression = '1 + 0.5*sin(2*pi*t/5400)'
-    scaling = scaling_from_config({'type': 'Function', 'expression': expression})
-
-    assert isinstance(scaling, FunctionScaling)
-    assert scaling_to_config(scaling) == {'type': 'Function', 'expression': expression}
-
-
-def test_function_scaling_from_config_rejects_dangerous_expression():
-    # `scaling_from_config` must forward `TimeExpression`'s rejection rather
-    # than swallowing or replacing it; the expression evaluator's own
-    # defence is pinned exhaustively in `test_config_expression.py`.
-    with pytest.raises(ValueError):
-        scaling_from_config({'type': 'Function',
-                              'expression': "__import__('os').system('id')"})
-
-
 def test_scaling_unknown_type_raises():
     with pytest.raises(ValueError, match='unknown scaling type'):
         scaling_from_config({'type': 'Sinusoid', 'scale': 1.0})
@@ -513,16 +496,17 @@ def test_source_scaling_is_written_back_out_by_to_config():
     # expects. A source that silently lost its scaling would still round-trip
     # "cleanly" and then run at a constant rate -- exactly the kind of quiet
     # wrong answer this schema is meant to prevent.
-    expression = '1 + 0.5*sin(2*pi*t/5400)'
+    scaling_block = {'type': 'Tabulated', 'time': '[0.0, 100.0] s',
+                     'scale': [1.0, 2.0]}
     block = {'type': 'IsotropicSource', 'flux': '1e-3 1/(cm s)',
              'spectrum': _spectrum_block(),
-             'scaling': {'type': 'Function', 'expression': expression}}
+             'scaling': scaling_block}
     source = source_from_config(block)
 
-    assert isinstance(source.scaling, FunctionScaling)
+    assert isinstance(source.scaling, TabulatedScaling)
 
     out = source_to_config(source)
-    assert out['scaling'] == {'type': 'Function', 'expression': expression}
+    assert out['scaling'] == scaling_block
 
 
 def test_a_non_default_constant_scaling_is_written_back_out_too():
@@ -1033,7 +1017,8 @@ FULL_CONFIG = {
          'flux': '1e-3 1/(cm s)',
          'spectrum': {'type': 'PowerLaw', 'index': -2,
                       'min_energy': '0.2 MeV', 'max_energy': '10 MeV'},
-         'scaling': {'type': 'Function', 'expression': '1 + 0.5*sin(2*pi*t/5400)'}},
+         'scaling': {'type': 'Sinusoidal', 'mean': 1.0, 'amplitude': 0.5,
+                     'period': '5400.0 s'}},
         {'name': 'iso', 'type': 'IsotropicSource', 'flux': '5e-4 1/(cm s)',
          'spectrum': _spectrum_block('0.5 MeV')},
         {'name': 'near', 'type': 'NearPointSource',
@@ -1110,7 +1095,8 @@ SEEDED_CONFIG = {
     'sources': [
         {'name': 'crab', 'type': 'PointSource', 'sky_angle': '45 deg',
          'flux': '5e-2 1/(cm s)', 'spectrum': _spectrum_block('1 MeV'),
-         'scaling': {'type': 'Function', 'expression': '1 + 0.5*sin(2*pi*t/5400)'}},
+         'scaling': {'type': 'Sinusoidal', 'mean': 1.0, 'amplitude': 0.5,
+                     'period': '5400.0 s'}},
         {'name': 'albedo', 'type': 'EarthAlbedoSource', 'emissivity': '2e-3 1/(cm s)',
          'spectrum': _spectrum_block('0.3 MeV')},
     ],

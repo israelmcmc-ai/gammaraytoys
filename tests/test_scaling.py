@@ -21,7 +21,7 @@ import pytest
 
 from gammaraytoys import ToyTracker2D
 from gammaraytoys.sims import (ConstantScaling, Earth, EarthAlbedoSource,
-                               ExtendedSource, FunctionScaling, InertialSimulator,
+                               ExtendedSource, InertialSimulator,
                                IsotropicSource, MonoenergeticSpectrum, NearFieldSource,
                                NearPointSource, Photon, PointSource,
                                SimpleTraditionalReconstructor, SpacecraftHistory,
@@ -192,54 +192,34 @@ def test_constant_scaling_scale_setter_validates_after_construction():
     assert scaling(0 * u.s) == 1.0
 
 
-def test_function_scaling_rejects_negative_return():
-    scaling = FunctionScaling(lambda t: -1.0)
+def test_constant_scaling_rejects_a_non_numeric_value():
+    # The other half of `_validate_scale`'s contract: a value that is not a
+    # number at all, rather than a number out of range. `float('not a
+    # number')` raises before the finite/non-negative check ever runs, so
+    # this pins that a scaling refuses it at construction instead of
+    # storing a string that only fails later, multiplied into a Poisson
+    # mean.
     with pytest.raises(ValueError):
-        scaling(0 * u.s)
+        ConstantScaling('not a number')
 
 
-def test_function_scaling_rejects_nan_return():
-    scaling = FunctionScaling(lambda t: np.nan)
-    with pytest.raises(ValueError):
-        scaling(0 * u.s)
+def test_scaling_call_returns_a_plain_float_of_its_own_value_at_that_time():
+    # Part A above checks *which* row a `TabulatedScaling` picks; this pins
+    # the two things every `SourceScaling.__call__` promises regardless of
+    # family. The returned value is the scaling's own value (not, say, a
+    # hardcoded 1.0 left behind after validation) and is a plain `float`,
+    # not a numpy scalar or a Quantity -- Section 6 multiplies it straight
+    # into a Poisson mean. And `time` really reaches the lookup: if it were
+    # dropped in favour of some fixed argument, the two calls below would
+    # return the same (wrong) number regardless of `t`.
+    scaling = TabulatedScaling(time=[0.0, 400.0] * u.s, scale=[2.5, 7.5])
 
-
-def test_function_scaling_rejects_non_numeric_return():
-    scaling = FunctionScaling(lambda t: 'not a number')
-    with pytest.raises(ValueError):
-        scaling(0 * u.s)
-
-
-def test_function_scaling_returns_the_callables_value_and_passes_time_through():
-    # No prior test in this file ever observes a `FunctionScaling`'s return
-    # value: the three above all pass callables whose bad return raises
-    # before it is ever read. Pin both halves of the contract: the
-    # returned value really is the callable's own value (not, say, a
-    # hardcoded 1.0 after validation), and `time` really reaches the
-    # callable unchanged (not, say, always called with `0.0 * u.s`).
-    seen_times = []
-
-    def constant_2p5(t):
-        seen_times.append(t)
-        return 2.5
-
-    scaling = FunctionScaling(constant_2p5)
     result = scaling(123.0 * u.s)
 
     assert result == 2.5
     assert type(result) is float
-    assert seen_times == [123.0 * u.s]
-
-    # A callable whose return value actually depends on `time`: if `time`
-    # were dropped in favour of some fixed argument, every call below
-    # would return the same (wrong) number regardless of `t`.
-    def linear_in_seconds(t):
-        return t.to_value(u.s) / 100.0
-
-    scaling2 = FunctionScaling(linear_in_seconds)
-    assert scaling2(300.0 * u.s) == pytest.approx(3.0)
-    assert scaling2(500.0 * u.s) == pytest.approx(5.0)
-    assert scaling2(300.0 * u.s) != scaling2(500.0 * u.s)
+    assert scaling(500.0 * u.s) == 7.5
+    assert scaling(123.0 * u.s) != scaling(500.0 * u.s)
 
 
 # ===========================================================================
@@ -445,17 +425,19 @@ def test_scaling_of_two_doubles_counts_relative_to_scaling_of_one():
     assert abs(n2 - 2 * MU) < 4 * sigma2
 
 
-def test_function_scaling_scales_a_real_inertial_simulator_run():
-    # The same guarantee as the test above, through a `FunctionScaling`
-    # instead of a `ConstantScaling` -- nothing else in this file runs a
-    # real `InertialSimulator` with one.
+def test_tabulated_scaling_scales_a_real_inertial_simulator_run():
+    # The same guarantee as the test above, through a `TabulatedScaling`
+    # instead of a `ConstantScaling`. The single-row table is constant
+    # everywhere (Part A), so the expected count is the same 2 * MU: what
+    # this adds is that the *scaling family* is not what decides whether
+    # the multiplier reaches the Poisson mean.
     np.random.seed(20260905)
 
     MU = 600.0
     detector = _make_tracker()
     history, earth = _one_interval_history()
 
-    scaling = FunctionScaling(lambda t: 2.0)
+    scaling = TabulatedScaling(time=[0.0] * u.s, scale=[2.0])
     events = _run_point_source(MU, scaling, detector, history, earth)
 
     expected = 2 * MU
