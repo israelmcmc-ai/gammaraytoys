@@ -1523,3 +1523,242 @@ def test_a_mistyped_choice_is_suggested():
         source_from_config({'type': 'EarthAlbedoSource',
                             'emissivity': '1e-4 1/(cm s)', 'law': 'isotropci',
                             'spectrum': _spectrum_block()}, earth=EARTH)
+
+
+# ===========================================================================
+# Part Q -- the run's Earth reaches the spacecraft history, both ways in
+# ===========================================================================
+#
+# CONTRACT.md: "do not let a config produce a run with two different planets".
+# Two wiring points were never exercised, and a run with two planets is the
+# exact bug PR 5 shipped:
+#
+#   * a `spacecraft_history` naming a real `.ori` file. Every test until now
+#     named one that does not exist, so the `earth =` argument on the open
+#     was never used for anything;
+#   * a `TargetedPointing` inside a full configuration. It is the one strategy
+#     whose whole job is deciding when the target is behind the Earth, so it
+#     is the one strategy that cannot be handed the wrong Earth without the
+#     answers changing.
+
+def _write_ori_file(path, orbit_radius_km):
+    """A three-row `.ori` file, written by hand rather than by
+    `SpacecraftHistory.write`, so that this test does not depend on the writer
+    it is about to read with. Columns are Section 4.1's, units baked into the
+    names. Two intervals, 100 s each, at a fixed radius and a slow prograde
+    drift; the third row is the terminator, whose pose and uptime are never
+    read."""
+
+    path.write_text(
+        "time_s,orbit_radius_km,orbit_angle_deg,attitude_deg,uptime_s\n"
+        f"0,{orbit_radius_km},0,0,100\n"
+        f"100,{orbit_radius_km},5,5,100\n"
+        f"200,{orbit_radius_km},10,10,0\n")
+
+    return str(path)
+
+
+def test_a_history_read_from_a_file_is_given_the_runs_own_earth(tmp_path):
+    config = _minimal_inertial_config()
+    config['spacecraft_history'] = _write_ori_file(tmp_path / 'iss.ori', 6771.0)
+
+    simulator = InertialSimulator.from_config(config)
+
+    # Identity, not "a planet of the same size": the history stores the Earth
+    # it was validated against and hands it on to everything downstream.
+    assert simulator.spacecraft_history.earth is simulator.earth
+    assert simulator.earth.radius == 6371 * u.km
+
+
+def test_a_history_file_is_validated_against_the_runs_earth_not_a_default_one(tmp_path):
+    # 6375 km sits deliberately between the configuration's Earth (6371 km,
+    # the plan's own value) and astropy's nominal `R_earth` (6378.1 km), which
+    # is what a default `Earth()` would use. This file is a legal orbit around
+    # the planet the file asks for, and an impossible one -- underground --
+    # around the planet a stray `Earth()` would invent, so a run that built
+    # its own here would refuse a file it has no business refusing.
+    assert 6371 < 6375 < R_earth.to_value(u.km)
+
+    config = _minimal_inertial_config()
+    config['spacecraft_history'] = _write_ori_file(tmp_path / 'low.ori', 6375.0)
+
+    simulator = InertialSimulator.from_config(config)
+
+    assert simulator.spacecraft_history.nintervals == 2
+
+
+def test_a_history_read_from_a_file_is_written_back_out_as_that_path(tmp_path):
+    path = _write_ori_file(tmp_path / 'iss.ori', 6771.0)
+    config = _minimal_inertial_config()
+    config['spacecraft_history'] = path
+
+    simulator = InertialSimulator.from_config(config)
+    out = simulator.to_config()
+
+    assert out['spacecraft_history'] == path
+
+    # And reading that back gives the same file again: the path is the
+    # provenance, and the rows are not copied into the configuration.
+    simulator2 = InertialSimulator.from_config(out)
+    assert simulator2.to_config() == out
+
+
+# A planet at exactly half the orbit radius. Its angular radius is then
+# arcsin(6771/2 / 6771) = arcsin(0.5) = 30 deg exactly, which makes the
+# occultation arithmetic below something a reader can check in their head --
+# and makes it wildly different from the 70.5 deg a default `Earth()` would
+# give at the same altitude, so the two cannot be confused.
+TARGETED_ORBIT_RADIUS_KM = 6771.0
+TARGETED_PLANET_RADIUS_KM = TARGETED_ORBIT_RADIUS_KM / 2
+TARGET_SKY_ANGLE_DEG = 0.0
+
+
+def _targeted_config():
+    return {
+        'detector': dict(DETECTOR_BLOCK),
+        'earth': {'radius': f'{TARGETED_PLANET_RADIUS_KM} km'},
+        'sources': [{'type': 'PointSource', 'sky_angle': '0 deg',
+                     'flux': '1e-3 1/(cm s)', 'spectrum': _spectrum_block()}],
+        'spacecraft_history': {
+            'type': 'elliptical_orbit',
+            'semi_major_axis': f'{TARGETED_ORBIT_RADIUS_KM} km',
+            'eccentricity': 0.0,
+            # Just under one period (5545 s for this semi-major axis), sampled
+            # often enough that the target rises and sets within the run.
+            'duration': '5400 s',
+            'time_step': '300 s',
+            'observation_strategy': {'type': 'TargetedPointing',
+                                     'sky_angle': f'{TARGET_SKY_ANGLE_DEG} deg'},
+        },
+    }
+
+
+def _attitude_expected_by_hand(orbit_angle_deg, planet_radius_km):
+    """The attitude `TargetedPointing` is documented to produce, worked out
+    here from the geometry rather than read off the implementation.
+
+    The target is occulted exactly when its sky direction falls within the
+    planet's angular radius `rho = arcsin(R/r)` of nadir, and nadir is
+    `orbit_angle + 180 deg`; the difference is wrapped to [-180, 180) deg.
+    Pointing at the target means `attitude = sky_angle`; while it is occulted
+    the strategy falls back to zenith pointing, `attitude = orbit_angle`."""
+
+    rho_deg = np.degrees(np.arcsin(planet_radius_km / TARGETED_ORBIT_RADIUS_KM))
+
+    nadir_deg = orbit_angle_deg + 180.0
+    offset_deg = (TARGET_SKY_ANGLE_DEG - nadir_deg + 180.0) % 360.0 - 180.0
+
+    return orbit_angle_deg if abs(offset_deg) < rho_deg else TARGET_SKY_ANGLE_DEG
+
+
+def test_a_targeted_pointing_in_a_full_config_occults_against_the_runs_earth():
+    simulator = InertialSimulator.from_config(_targeted_config())
+
+    orbit_angles = []
+    attitudes = []
+
+    for interval in simulator.spacecraft_history:
+        # A circular orbit, so every row is at the semi-major axis.
+        assert interval.orbit_radius.to_value(u.km) == pytest.approx(
+            TARGETED_ORBIT_RADIUS_KM)
+        orbit_angles.append(interval.orbit_angle.to_value(u.deg))
+        attitudes.append(interval.attitude.to_value(u.deg))
+
+    expected = [_attitude_expected_by_hand(angle, TARGETED_PLANET_RADIUS_KM)
+                for angle in orbit_angles]
+
+    assert attitudes == pytest.approx(expected)
+
+    # The test only proves anything if the target both rises and sets inside
+    # the run: an "always visible" sample would match any Earth at all.
+    assert TARGET_SKY_ANGLE_DEG in expected
+    assert any(value != TARGET_SKY_ANGLE_DEG for value in expected)
+
+    # And it only tells the two planets apart if they disagree somewhere on
+    # this sample. They do: 30 deg of angular radius against 70.5 deg.
+    if_it_built_its_own_earth = [
+        _attitude_expected_by_hand(angle, R_earth.to_value(u.km))
+        for angle in orbit_angles]
+    assert expected != if_it_built_its_own_earth
+
+
+def test_a_targeted_pointing_in_a_full_config_round_trips():
+    simulator = InertialSimulator.from_config(_targeted_config())
+    out1 = simulator.to_config()
+
+    assert out1['spacecraft_history']['observation_strategy']['type'] == 'TargetedPointing'
+    assert u.Quantity(
+        out1['spacecraft_history']['observation_strategy']['sky_angle']) == 0 * u.deg
+
+    simulator2 = InertialSimulator.from_config(out1)
+    assert simulator2.to_config() == out1
+
+
+# ===========================================================================
+# Part R -- a genuinely per-layer detector round-trips layer by layer
+# ===========================================================================
+#
+# `detector_to_config` collapses a per-layer array back to the single value it
+# was written as, so a configuration that gave one number reads back as one
+# number rather than six copies of it. Every detector in this file until now
+# gave one number, which means a collapse that threw the other five away
+# would have gone unnoticed.
+
+# The same geometry as `DETECTOR_BLOCK`, with each of the three per-layer
+# keys given a different value on every layer. Layers sit at 0, 5, 10, 20, 25
+# and 30 mm, so consecutive thicknesses have to average less than the gap
+# between their layers (5 mm, except 10 mm in the middle) for the layers not
+# to overlap: 1, 2, 3, 4, 3, 2 mm does that with room to spare.
+PER_LAYER_DETECTOR_BLOCK = {
+    'type': 'ToyTracker2D',
+    'material': 'Ge',
+    'layer_length': '16 cm',
+    'layer_positions': '[0, 5, 10, 20, 25, 30] mm',
+    'layer_thickness': '[1.0, 2.0, 3.0, 4.0, 3.0, 2.0] mm',
+    'energy_resolution': [0.01, 0.02, 0.03, 0.04, 0.03, 0.02],
+    'energy_threshold': '[20.0, 25.0, 30.0, 35.0, 30.0, 25.0] keV',
+}
+
+
+def test_a_per_layer_detector_keeps_every_layers_own_value():
+    detector = detector_from_config(PER_LAYER_DETECTOR_BLOCK)
+
+    out = detector_to_config(detector)
+
+    # Layer by layer, and in order: a detector written back out with only its
+    # first layer's numbers would be a different instrument.
+    assert u.Quantity(out['layer_thickness']).to_value(u.mm) == pytest.approx(
+        [1.0, 2.0, 3.0, 4.0, 3.0, 2.0])
+    assert out['energy_resolution'] == pytest.approx(
+        [0.01, 0.02, 0.03, 0.04, 0.03, 0.02])
+    assert u.Quantity(out['energy_threshold']).to_value(u.keV) == pytest.approx(
+        [20.0, 25.0, 30.0, 35.0, 30.0, 25.0])
+
+
+def test_a_per_layer_detector_round_trips():
+    detector = detector_from_config(PER_LAYER_DETECTOR_BLOCK)
+    out1 = detector_to_config(detector)
+
+    detector2 = detector_from_config(out1)
+    out2 = detector_to_config(detector2)
+
+    assert out1 == out2
+
+    # And the object really did come back the same, not just its description.
+    assert np.all(detector2.layer_thickness == detector.layer_thickness)
+    assert np.all(detector2.energy_threshold == detector.energy_threshold)
+    assert np.all(np.asarray(detector2.energy_resolution)
+                  == np.asarray(detector.energy_resolution))
+
+
+def test_a_per_layer_detector_round_trips_inside_a_whole_configuration():
+    config = dict(_minimal_detector_frame_config(),
+                  detector=dict(PER_LAYER_DETECTOR_BLOCK))
+
+    simulator = Simulator.from_config(config)
+    out1 = simulator.to_config()
+
+    assert u.Quantity(out1['detector']['layer_thickness']).to_value(u.mm) == (
+        pytest.approx([1.0, 2.0, 3.0, 4.0, 3.0, 2.0]))
+
+    assert Simulator.from_config(out1).to_config() == out1
