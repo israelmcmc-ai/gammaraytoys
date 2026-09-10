@@ -1918,8 +1918,11 @@ def source_from_config(config, where = 'source', earth = None):
 
     - `PointSource`: `offaxis_angle` **or** `sky_angle` -- exactly one, the
       first putting the source at a fixed detector-frame angle and the
-      second on the inertial sky -- plus `flux`, or `flux_pivot` with
-      `pivot_energy`, never both.
+      second on the inertial sky -- plus `flux`, or `flux_pivot` and
+      `pivot_energy` together, never both normalisations and never half
+      of the pivot pair. All three may be left out, which is a source
+      with no flux: it can be drawn from but not counted (see
+      `PointSource`).
     - `IsotropicSource`: `flux`.
     - `NearPointSource`: `position` (a block of `x` and `y`) and `rate`.
     - `ExtendedSource`: `sky_angle`, `width` and `flux`.
@@ -1949,7 +1952,9 @@ def source_from_config(config, where = 'source', earth = None):
         On an unknown type or key, a missing required key, a bad value, or
         anything the source class itself rejects -- including a
         `PointSource` given both `offaxis_angle` and `sky_angle` or
-        neither, whose own error is surfaced rather than replaced.
+        neither, whose own error is surfaced rather than replaced. Also
+        on a `PointSource` given `flux` beside the pivot pair, or only
+        one half of that pair.
     """
 
     block = _as_mapping(config, where)
@@ -1968,6 +1973,22 @@ def source_from_config(config, where = 'source', earth = None):
                 f"`PointSource` prefers 'flux' and drops the pivot pair "
                 f"without saying so, and 'to_config' then writes the file "
                 f"back out with only the 'flux' in it.")
+
+        # The same silent wrong answer one step along: `flux_pivot` and
+        # `pivot_energy` are two halves of one number, and `PointSource`
+        # uses neither of them without the other. Given only one it leaves
+        # the flux unset rather than complaining, so the run draws from an
+        # unnormalised source and 'to_config' writes the file back out
+        # with the lone key gone.
+        if ('flux_pivot' in block) != ('pivot_energy' in block):
+            given = 'flux_pivot' if 'flux_pivot' in block else 'pivot_energy'
+            missing = 'pivot_energy' if given == 'flux_pivot' else 'flux_pivot'
+            raise ValueError(
+                f"{where}: a PointSource given {given!r} needs {missing!r} "
+                f"as well -- the two are halves of one normalisation, the "
+                f"differential flux and the energy it is quoted at, and "
+                f"`PointSource` uses neither without the other. Give both, "
+                f"or give 'flux' instead.")
 
         # Both are read and both are passed on, even when one (or neither)
         # is there: `PointSource` itself enforces "exactly one of the two",
