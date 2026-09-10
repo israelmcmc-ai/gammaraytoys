@@ -168,7 +168,7 @@ class ObservationStrategy(ABC):
                     'sky_angle': _format_quantity(self.sky_angle)}
 
         raise ValueError(
-            f"{type(self).__name__} is not an observation self a "
+            f"{type(self).__name__} is not an observation strategy a "
             f"configuration can describe; the types that are: "
             f"{sorted(set(_STRATEGY_TYPES.values()))}.")
 

@@ -165,7 +165,7 @@ class ToyTracker2D:
 
         if material is None:
             raise ValueError(
-                "this self's material was built directly from a density and "
+                "this detector's material was built directly from a density and "
                 "an attenuation table rather than by name, so there is no material "
                 "name to write into a configuration.")
 

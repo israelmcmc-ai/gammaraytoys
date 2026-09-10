@@ -649,7 +649,7 @@ class Source(ABC):
 
         if block['type'] not in _SOURCE_TYPES:
             raise ValueError(
-                f"{type(self).__name__} is not a self a configuration can "
+                f"{type(self).__name__} is not a source a configuration can "
                 f"describe; the types that are: "
                 f"{sorted(set(_SOURCE_TYPES.values()))}.")
 
@@ -676,7 +676,7 @@ class Source(ABC):
             if self.rate is not None:
                 block['rate'] = _format_quantity(self.rate)
         elif not isinstance(self, EarthAlbedoSource):
-            # Every other far-field self carries an optional sky-integrated
+            # Every other far-field source carries an optional sky-integrated
             # flux; the albedo carries an emissivity instead, and its flux is a
             # function of the orbit rather than a free parameter.
             flux = self.flux()
