@@ -99,6 +99,24 @@ is otherwise the canonical spelling of the same thing -- feeding it back
 through `*_from_config` gives an equal object, and writing that out again
 gives an identical configuration.
 
+Sibling files
+-------------
+
+A configuration can name files beside it -- an `.ori` spacecraft history,
+a `TabulatedScaling`'s CSV. **A relative path is taken relative to the
+directory holding the configuration file**, so that a configuration in
+`runs/` naming `iss.ori` finds `runs/iss.ori` and can be loaded from
+anywhere. Absolute paths are used as written.
+
+The one exception is a configuration handed in as an already-parsed
+mapping: it came from no file, so there is no directory to resolve
+against, and a relative path there falls back to the process' working
+directory, as it always has.
+
+`*_to_config` writes a path back **exactly as it was given**. Rewriting
+`iss.ori` as `/home/someone/runs/iss.ori` on the way out would turn a
+portable configuration into a machine-specific one.
+
 Two things cannot be recovered from the objects themselves and so ride on
 the configuration a simulator was built from, recorded by `from_config`:
 the spacecraft history's provenance (an `.ori` path, or the orbital
@@ -733,7 +751,9 @@ def load_config(config):
     Parameters
     ----------
     config : str, path-like or mapping
-        A path to a YAML file, or an already-parsed mapping.
+        A path to a YAML file, or an already-parsed mapping. Which of the
+        two it is also decides where the relative sibling paths inside it
+        point: see `_config_base_dir` and the module docstring.
 
     Returns
     -------
@@ -772,6 +792,80 @@ def load_config(config):
         raise ValueError(f"{path}: is empty.")
 
     return _as_mapping(parsed, str(path))
+
+
+def _config_base_dir(config):
+    """
+    The directory a configuration's relative sibling paths resolve against.
+
+    Parameters
+    ----------
+    config : str, path-like or mapping
+        Whatever was handed to `load_config`.
+
+    Returns
+    -------
+    `pathlib.Path` or None
+        The directory holding the configuration file, or `None` if
+        `config` is an already-parsed mapping -- which came from no file
+        and so has no directory of its own.
+    """
+
+    if isinstance(config, (str, Path)):
+        return Path(config).parent
+
+    return None
+
+
+def _resolve_path(filename, base_dir):
+    """
+    Resolve a path a configuration named for a file beside it.
+
+    Parameters
+    ----------
+    filename : str
+        The path exactly as it was written in the configuration.
+    base_dir : `pathlib.Path` or None
+        The directory holding the configuration file, from
+        `_config_base_dir`. `None` when there is no such directory.
+
+    Returns
+    -------
+    `pathlib.Path`
+        `filename` taken relative to `base_dir`, so a configuration in
+        `runs/` finds `runs/iss.ori` however the process was started. An
+        absolute `filename` is used as written, and so is a relative one
+        when `base_dir` is `None`, which leaves it resolving against the
+        working directory as it always has.
+    """
+
+    path = Path(filename)
+
+    if path.is_absolute() or base_dir is None:
+        return path
+
+    return base_dir / path
+
+
+def _searched_dir(path):
+    """
+    The directory a path was looked for in, for a "does not exist" message.
+
+    Parameters
+    ----------
+    path : `pathlib.Path`
+        The resolved path, from `_resolve_path`.
+
+    Returns
+    -------
+    `pathlib.Path`
+        The containing directory, made absolute. "Not found" without a
+        location is what makes a relative path in a configuration
+        confusing in the first place: the whole question is *where* it was
+        looked for.
+    """
+
+    return path.absolute().parent
 
 
 # ---------------------------------------------------------------------------
@@ -1640,7 +1734,7 @@ _SCALING_TYPES = {'Constant': 'Constant',
                   'FunctionScaling': 'Function'}
 
 
-def scaling_from_config(config, where = 'scaling'):
+def scaling_from_config(config, where = 'scaling', base_dir = None):
     """
     Build a `SourceScaling` from its configuration block.
 
@@ -1660,6 +1754,12 @@ def scaling_from_config(config, where = 'scaling'):
         The `scaling` block.
     where : str
         Label for this block in error messages.
+    base_dir : `pathlib.Path` or None
+        The directory a relative `file` is taken relative to -- the
+        directory of the configuration file, when there was one. `None`
+        (the default, and what a configuration handed in as a mapping
+        gets) leaves a relative path resolving against the working
+        directory. An absolute `file` is unaffected either way.
 
     Returns
     -------
@@ -1696,16 +1796,19 @@ def scaling_from_config(config, where = 'scaling'):
 
         if has_file:
             filename = _text(block, 'file', where, required = True)
+            path = _resolve_path(filename, base_dir)
             try:
-                return TabulatedScaling.open(filename)
+                return TabulatedScaling.open(path)
             except FileNotFoundError as err:
                 # Still a FileNotFoundError -- "the file is missing" is a
                 # different problem from "the file is wrong", and a caller
                 # may reasonably want to tell them apart. Only the message
                 # changes: on its own it says nothing but the path, which in
-                # a file with a dozen scalings in it does not say which one.
+                # a file with a dozen scalings in it does not say which one,
+                # nor where it was looked for.
                 raise FileNotFoundError(
-                    f"{where}: key 'file' = {filename!r} does not exist.") from err
+                    f"{where}: key 'file' = {filename!r} does not exist "
+                    f"(looked in {_searched_dir(path)}).") from err
             except Exception as err:
                 raise ValueError(
                     f"{where}: could not read the table from {filename!r} "
@@ -1852,7 +1955,7 @@ def _position_from_config(block, where):
                        _quantity(inner, 'y', inner_where, u.cm, required = True))
 
 
-def _common_source_kwargs(block, where):
+def _common_source_kwargs(block, where, base_dir = None):
     """
     Read the constructor arguments every source type shares.
 
@@ -1862,6 +1965,9 @@ def _common_source_kwargs(block, where):
         The source block.
     where : str
         Label for this block in error messages.
+    base_dir : `pathlib.Path` or None
+        The directory a relative path inside the `scaling` block resolves
+        against. See `scaling_from_config`.
 
     Returns
     -------
@@ -1884,7 +1990,8 @@ def _common_source_kwargs(block, where):
 
     scaling = None
     if 'scaling' in block:
-        scaling = scaling_from_config(block['scaling'], f"{where}.scaling")
+        scaling = scaling_from_config(block['scaling'], f"{where}.scaling",
+                                      base_dir = base_dir)
 
     chirality = _integer(block, 'chirality', where)
 
@@ -1900,7 +2007,7 @@ def _common_source_kwargs(block, where):
                                         default = 0, minimum = 0, maximum = 1)}
 
 
-def source_from_config(config, where = 'source', earth = None):
+def source_from_config(config, where = 'source', earth = None, base_dir = None):
     """
     Build a `Source` from its configuration block.
 
@@ -1941,6 +2048,9 @@ def source_from_config(config, where = 'source', earth = None):
         6378.1 km, *not* the 6371 km a configuration typically names, so
         the top-level loader always passes the run's single Earth here
         rather than letting a run end up with two different planets.
+    base_dir : `pathlib.Path` or None
+        The directory a relative path inside this source's `scaling` block
+        resolves against. See `scaling_from_config`.
 
     Returns
     -------
@@ -1965,7 +2075,7 @@ def source_from_config(config, where = 'source', earth = None):
     allowed = _COMMON_SOURCE_KEYS + _SOURCE_KEYS[name]
     _check_keys(block, where, allowed)
 
-    kwargs = _common_source_kwargs(block, where)
+    kwargs = _common_source_kwargs(block, where, base_dir)
 
     if name == 'PointSource':
         if 'flux' in block and ('flux_pivot' in block or 'pivot_energy' in block):
@@ -2334,7 +2444,7 @@ _ORBIT_QUANTITIES = {'semi_major_axis': (u.km, 0),
 
 
 def spacecraft_history_from_config(config, where = 'spacecraft_history',
-                                   earth = None):
+                                   earth = None, base_dir = None):
     """
     Build a `SpacecraftHistory` from its configuration entry.
 
@@ -2376,6 +2486,12 @@ def spacecraft_history_from_config(config, where = 'spacecraft_history',
         The Earth the history is validated against (`orbit_radius >
         earth.radius`) and that a `TargetedPointing` strategy points
         around. `None` falls back to `SpacecraftHistory`'s own default.
+    base_dir : `pathlib.Path` or None
+        The directory a relative `.ori` path is taken relative to -- the
+        directory of the configuration file, when there was one. `None`
+        (the default, and what a configuration handed in as a mapping
+        gets) leaves a relative path resolving against the working
+        directory. An absolute path is unaffected either way.
 
     Returns
     -------
@@ -2391,10 +2507,10 @@ def spacecraft_history_from_config(config, where = 'spacecraft_history',
         If the named `.ori` file does not exist.
     """
 
-    return _spacecraft_history_from_config(config, where, earth)[0]
+    return _spacecraft_history_from_config(config, where, earth, base_dir)[0]
 
 
-def _spacecraft_history_from_config(config, where, earth):
+def _spacecraft_history_from_config(config, where, earth, base_dir = None):
     """
     Build a `SpacecraftHistory` and the canonical block describing it.
 
@@ -2412,13 +2528,19 @@ def _spacecraft_history_from_config(config, where, earth):
         Label for this entry in error messages.
     earth : `Earth` or None
         The Earth to validate against and to hand to a `TargetedPointing`.
+    base_dir : `pathlib.Path` or None
+        The directory a relative `.ori` path resolves against. See
+        `spacecraft_history_from_config`.
 
     Returns
     -------
     history : `SpacecraftHistory`
         The history.
     block : str or dict
-        The canonical configuration entry describing it.
+        The canonical configuration entry describing it. A path is the
+        string the configuration wrote, never the resolved one: writing
+        the resolved path back out would turn a portable configuration
+        into a machine-specific one.
 
     Raises
     ------
@@ -2427,13 +2549,16 @@ def _spacecraft_history_from_config(config, where, earth):
     """
 
     if isinstance(config, str):
+        path = _resolve_path(config, base_dir)
         try:
-            history = SpacecraftHistory.open(config, earth = earth)
+            history = SpacecraftHistory.open(path, earth = earth)
         except FileNotFoundError as err:
             # As for a Tabulated scaling's 'file': the type is kept, only
-            # the message gains the key that asked for the path.
+            # the message gains the key that asked for the path and the
+            # directory it was looked for in.
             raise FileNotFoundError(
-                f"{where} = {config!r} does not exist.") from err
+                f"{where} = {config!r} does not exist "
+                f"(looked in {_searched_dir(path)}).") from err
         except Exception as err:
             raise ValueError(
                 f"{where}: could not read the spacecraft history from "
@@ -2559,7 +2684,7 @@ _COMMON_TOP_KEYS = ('detector', 'earth', 'sources', 'reconstructor',
 _MAX_SEED = 2 ** 32 - 1
 
 
-def _sources_from_config(config, where, earth):
+def _sources_from_config(config, where, earth, base_dir = None):
     """
     Build every source in the `sources` list, and collect their names.
 
@@ -2571,6 +2696,9 @@ def _sources_from_config(config, where, earth):
         Label for the list in error messages.
     earth : `Earth`
         The run's single Earth, handed to every source that needs one.
+    base_dir : `pathlib.Path` or None
+        The directory a relative path inside a source's `scaling` block
+        resolves against. See `scaling_from_config`.
 
     Returns
     -------
@@ -2610,7 +2738,7 @@ def _sources_from_config(config, where, earth):
         if isinstance(block.get('name'), str):
             label = f"{label} ({block['name']})"
 
-        source = source_from_config(block, label, earth)
+        source = source_from_config(block, label, earth, base_dir)
         sources.append(source)
 
         if 'name' in block:
@@ -2646,7 +2774,13 @@ def simulator_from_config(cls, config, inertial):
     cls : type
         The simulator class to instantiate.
     config : str, path-like or mapping
-        A path to a YAML file, or an already-parsed mapping.
+        A path to a YAML file, or an already-parsed mapping. Relative
+        paths the configuration names for files beside it -- an `.ori`
+        spacecraft history, a `TabulatedScaling`'s CSV -- are taken
+        relative to the directory of that YAML file, so a configuration in
+        `runs/` can be loaded from anywhere. A mapping came from no file
+        and has no directory, so relative paths in one fall back to the
+        working directory. Absolute paths are used as written, always.
     inertial : bool
         Whether `cls` is the inertial simulator, and so takes (and
         requires) a `spacecraft_history` and an `earth`.
@@ -2670,6 +2804,10 @@ def simulator_from_config(cls, config, inertial):
 
     where = 'config'
     block = load_config(config)
+
+    # Where a relative sibling path in this configuration points. `None`
+    # for a mapping, which has no file and so no directory of its own.
+    base_dir = _config_base_dir(config)
 
     allowed = _COMMON_TOP_KEYS + (('spacecraft_history',) if inertial else ())
 
@@ -2701,7 +2839,8 @@ def simulator_from_config(cls, config, inertial):
 
     seed = _integer(block, 'random_seed', where, minimum = 0, maximum = _MAX_SEED)
 
-    sources, names = _sources_from_config(block['sources'], f"{where}.sources", earth)
+    sources, names = _sources_from_config(block['sources'], f"{where}.sources",
+                                          earth, base_dir)
 
     kwargs = {'detector': detector,
               'sources': sources,
@@ -2712,7 +2851,8 @@ def simulator_from_config(cls, config, inertial):
 
     if inertial:
         history, history_block = _spacecraft_history_from_config(
-            block['spacecraft_history'], f"{where}.spacecraft_history", earth)
+            block['spacecraft_history'], f"{where}.spacecraft_history", earth,
+            base_dir)
         kwargs['spacecraft_history'] = history
         kwargs['earth'] = earth
 
