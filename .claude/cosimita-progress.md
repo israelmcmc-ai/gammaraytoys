@@ -42,7 +42,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
 | 6 | Time-dependent scaling + event CSV I/O | merged | **Merged** (PR #20) |
-| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | Implementer running |
+| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | Implemented, tested, reviewed; review findings fixed and re-tested. 637 tests green. Ready to open. |
 
 Side PRs, outside the seven:
 
@@ -363,6 +363,53 @@ backend and silently strips every figure while still exiting 0.
   keeps working -- the proxy's injected write credential drops and comes back. Six
   consecutive attempts failed and the seventh succeeded with nothing changed. Commits
   are not lost when this happens; re-push rather than redoing the work.
+
+## Lessons from PR 7's review round
+
+- **A mutation battery cannot find a rule that is the wrong shape.** PR 7's expression
+  evaluator guarded `**` with two rules on the *exponent*. Every mutation of those rules
+  was caught; the tests were fine. But both rules inspect only the **right** operand, and
+  all the growth in a left-nested tower is on the left: `(((2**64)**64)**64)**64` built a
+  16,777,217-bit integer, and each further nesting *squared* that (5.7 s / 703 MB one
+  deeper, 61 s / 3.7 GB / `MemoryError` two deeper). Mutation testing asks "are these
+  rules pinned?", never "are these the right rules?". Only an adversarial reviewer whose
+  brief says *try to defeat it* found it.
+- **The attack was invisible.** `1 + 0*(((2**64)**64)**64)**64` returns exactly `1.0`, so
+  the config loads in 9 ms, the scaling looks like a no-op, and the run silently takes
+  577x longer. A test asserting the scaling's *value* would have passed.
+- **Prefer removing the possibility to out-guessing the shape.** Patching "no `**` on the
+  left either" was itself beaten in ten minutes by `((((2**64*1)**64*1)**64*1)**64*1)**64`.
+  The fix that worked deleted both rules and made `**` float-only via an
+  `ast.NodeTransformer` before `compile` — floats overflow instead of growing, so there is
+  no tree shape left to guess. It also *stopped* a wrong refusal: `0.999**1000` was being
+  rejected, and a survival fraction raised to a step count is ordinary physics.
+- **A daemon thread cannot bound a big `**`.** A single arbitrary-precision power is one
+  uninterruptible C call that never releases the GIL, so `join(timeout)` does not return
+  until it finishes: measured, `join(0.3)` on `7**40000000` returned after **45.7 s**. A
+  thread guard around `9**9**9**9` would hang CI, which is the exact failure it was meant
+  to prevent. Bound it in a **child process** with a timeout and an `RLIMIT_AS`.
+- **Cap the expression length, and measure the boundary before choosing the number.** The
+  obvious ~1000 characters would have been decorative: the recursion limit through the two
+  nested tree walks is **497 characters**. 250 closes both the recursion half and the
+  integer-multiply half.
+- **Round-trip tests are structurally blind to a field both writes omit.** `to_config`
+  dropping a source's `scaling` passed every round-trip test — compare two writes to each
+  other and a missing key is invisible. A source could lose its `FunctionScaling` and still
+  "round-trip cleanly", then run at a constant rate. Assert named fields, not just equality.
+- **A silent load that dies far away is the worst failure mode, and this schema had four.**
+  A negative `flux` loaded fine, round-tripped verbatim, then died inside numpy with
+  `lam < 0 or lam is NaN` naming nothing. `flux` beside `flux_pivot`, and either half of the
+  pivot pair alone, were silently resolved. A `pivot_energy` outside the spectrum's range
+  gave `inf`, and `to_config` wrote `flux: 'inf 1 / (cm s)'` back into the file, where it
+  looks deliberate. Validate at the point the value is read, as `scaling.py` already did.
+- **A "did you mean" can be worse than silence.** Adding `difflib` to the function-name
+  error made `min(1, t)` suggest `'sin'` (edit distance 0.667) over `'minimum'` (0.60), and
+  `cosine(t)` suggest `'sin'` over `'cos'`. Prefer prefix relationships for identifiers.
+- **Notebooks are code that goes stale.** The capstone demonstrated the two deleted `**`
+  rules, with their messages baked into its stored output; re-run, it printed
+  `NOT rejected (!)`. Any PR that changes behaviour a notebook teaches has to re-run it.
+- **Brief the reviewer to attack, not to read.** The three findings that mattered all came
+  from the instruction "decide whether you can defeat it — try", with measurements demanded.
 
 ## Known environment traps for agents
 
