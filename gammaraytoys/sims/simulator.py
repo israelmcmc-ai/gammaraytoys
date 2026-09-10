@@ -131,8 +131,8 @@ class Simulator(SimulatorBase):
             If any part of this simulator is not something a configuration
             can describe -- a detector whose material was built from a
             table rather than by name, a source type a configuration cannot
-            name, or a `FunctionScaling` wrapping an arbitrary callable
-            rather than a configuration expression.
+            name, or a scaling that is not one of the four a configuration
+            can name.
         """
 
         return simulator_to_config(self)

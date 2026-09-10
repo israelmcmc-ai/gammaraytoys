@@ -17,7 +17,8 @@ import pandas as pd
 import astropy.units as u
 
 
-__all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling', 'FunctionScaling']
+__all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling',
+           'BurstScaling', 'SinusoidalScaling']
 
 
 def _validate_scale(value, what):
@@ -315,55 +316,270 @@ class TabulatedScaling(SourceScaling):
         return float(self._scale[idx])
 
 
-class FunctionScaling(SourceScaling):
+class BurstScaling(SourceScaling):
     """
-    A scaling that wraps an arbitrary callable of time.
+    A scaling that is zero everywhere except inside a single window: a
+    burst that switches on at `start`, holds `amplitude` for `duration`,
+    and is `0.0` before and after. This is the shape a transient has in a
+    teaching run -- a gamma-ray burst against a quiet background.
+
+    The window is **half-open**, `start <= t < start + duration`: the
+    instant the burst starts belongs to the burst, and the instant it ends
+    belongs to what comes after. That is not an arbitrary choice.
+    `TabulatedScaling` above is already right-continuous -- a breakpoint
+    belongs to the row *at* it -- and two scalings in the same package
+    disagreeing about which side of an edge a time falls on would be a
+    trap: a burst and a table describing the same lightcurve would differ
+    by one interval, at exactly the times a user is most likely to check
+    by hand.
     """
 
-    def __init__(self, function):
+    def __init__(self, start, duration, amplitude = 1.0):
         """
         Parameters
         ----------
-        function : callable
-            `function(time) -> float`, where `time` is an
-            `astropy.units.Quantity` (time units) and the return value is a
-            finite, non-negative real number. Validated on every call, not
-            at construction (the function itself is not evaluated here).
-        """
-
-        self.function = function
-
-    def __call__(self, time):
-        """
-        The scale factor at `time`: `self.function(time)`, validated.
-
-        Parameters
-        ----------
-        time : `astropy.units.Quantity`
-            The time to evaluate (time units).
-
-        Returns
-        -------
-        float
-            `self.function(time)`, as a finite, non-negative `float`.
+        start : `astropy.units.Quantity`
+            The time the burst switches on (time units). Any finite time,
+            including a negative one.
+        duration : `astropy.units.Quantity`
+            How long the burst lasts (time units). Must be positive.
+        amplitude : float
+            The scale factor while the burst lasts. Must be a finite,
+            non-negative number. Defaults to 1.0.
 
         Raises
         ------
         ValueError
-            If `self.function(time)` is not convertible to `float`, or is
-            not finite and non-negative. A negative scaling would give a
-            negative Poisson mean and blow up deep inside the run, far from
-            this callable; catching it here names the actual offender.
+            If `start` is not finite, if `duration` is not positive (a
+            zero or negative window is never what a user meant, and would
+            make a burst that never happens), or if `amplitude` is not
+            finite and non-negative.
         """
 
-        value = self.function(time)
+        start_s = float(start.to_value(u.s))
+        duration_s = float(duration.to_value(u.s))
 
-        try:
-            value = float(value)
-        except (TypeError, ValueError) as err:
+        if not np.isfinite(start_s):
             raise ValueError(
-                f"FunctionScaling's callable must return a real number; at "
-                f"time={time} it returned {value!r} ({type(value).__name__}), "
-                f"which is not convertible to float.") from err
+                f"BurstScaling's start must be finite; got {start}.")
 
-        return _validate_scale(value, f"FunctionScaling's callable, at time={time},")
+        if not np.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError(
+                f"BurstScaling's duration must be a finite, positive time; "
+                f"got {duration}.")
+
+        self._start_s = start_s
+        self._duration_s = duration_s
+        self._amplitude = _validate_scale(float(amplitude),
+                                          "BurstScaling's amplitude")
+
+    @property
+    def start(self):
+        """
+        `astropy.units.Quantity`: the time the burst switches on, in
+        seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._start_s * u.s
+
+    @property
+    def duration(self):
+        """
+        `astropy.units.Quantity`: how long the burst lasts, in seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._duration_s * u.s
+
+    @property
+    def amplitude(self):
+        """
+        float: the scale factor while the burst lasts.
+
+        Returns
+        -------
+        float
+        """
+        return self._amplitude
+
+    def __call__(self, time):
+        """
+        The scale factor at `time`: `self.amplitude` inside the half-open
+        window `start <= time < start + duration`, `0.0` outside it.
+
+        Parameters
+        ----------
+        time : `astropy.units.Quantity`
+            The time to evaluate (time units). Scalar.
+
+        Returns
+        -------
+        float
+            `self.amplitude` or `0.0`. Both were checked finite and
+            non-negative at construction, so there is nothing left to
+            validate here.
+        """
+
+        t = time.to_value(u.s)
+
+        if self._start_s <= t < self._start_s + self._duration_s:
+            return self._amplitude
+
+        return 0.0
+
+
+class SinusoidalScaling(SourceScaling):
+    """
+    A scaling that oscillates smoothly about a mean:
+
+        `mean + amplitude * sin(2 * pi * (t - reference_time) / period)`
+
+    so it runs between `mean - amplitude` and `mean + amplitude`, once
+    every `period`, and equals `mean` (and is rising) at
+    `reference_time`. This is the shape a periodic modulation has in a
+    teaching run -- a source brightening and dimming once per orbit.
+
+    `amplitude` may not exceed `mean`: see `__init__`.
+    """
+
+    def __init__(self, mean, amplitude, period, reference_time = 0 * u.s):
+        """
+        Parameters
+        ----------
+        mean : float
+            The scale factor the oscillation is centred on. Must be a
+            finite, non-negative number.
+        amplitude : float
+            How far the scale factor swings either side of `mean`. Must be
+            a finite, non-negative number, and no larger than `mean`.
+        period : `astropy.units.Quantity`
+            The **full** period of the oscillation (time units), not an
+            angular frequency: one whole cycle takes exactly this long, so
+            a caller who wants a scaling that repeats once per 5400-second
+            orbit writes `5400 * u.s` and never has to get a factor of
+            `2 * pi` right. Must be positive.
+        reference_time : `astropy.units.Quantity`
+            The time the sine is zero and rising, i.e. the phase origin
+            (time units). Defaults to `0 * u.s`.
+
+        Raises
+        ------
+        ValueError
+            If `mean` or `amplitude` is not finite and non-negative, if
+            `period` is not positive, if `reference_time` is not finite,
+            or if `amplitude` is greater than `mean`.
+
+            The last one is the interesting check. With
+            `amplitude > mean` the sine dips below zero for part of every
+            cycle, which is a negative scaling, which is a negative
+            Poisson mean deep inside `InertialSimulator.run_events` --
+            precisely the failure `_validate_scale` exists to prevent, and
+            precisely as far from its cause. The oscillation is negative
+            *by construction* there, not by accident at one time, so the
+            honest place to say so is here, where the two numbers that
+            disagree are both in hand.
+        """
+
+        period_s = float(period.to_value(u.s))
+        reference_time_s = float(reference_time.to_value(u.s))
+
+        mean = _validate_scale(float(mean), "SinusoidalScaling's mean")
+        amplitude = _validate_scale(float(amplitude),
+                                    "SinusoidalScaling's amplitude")
+
+        if not np.isfinite(period_s) or period_s <= 0:
+            raise ValueError(
+                f"SinusoidalScaling's period must be a finite, positive time; "
+                f"got {period}.")
+
+        if not np.isfinite(reference_time_s):
+            raise ValueError(
+                f"SinusoidalScaling's reference_time must be finite; got "
+                f"{reference_time}.")
+
+        if amplitude > mean:
+            raise ValueError(
+                f"SinusoidalScaling's amplitude ({amplitude}) must not exceed "
+                f"its mean ({mean}); otherwise the scaling is negative for "
+                f"part of every cycle, which is a negative Poisson mean in "
+                f"the simulator.")
+
+        self._mean = mean
+        self._amplitude = amplitude
+        self._period_s = period_s
+        self._reference_time_s = reference_time_s
+
+    @property
+    def mean(self):
+        """
+        float: the scale factor the oscillation is centred on.
+
+        Returns
+        -------
+        float
+        """
+        return self._mean
+
+    @property
+    def amplitude(self):
+        """
+        float: how far the scale factor swings either side of `mean`.
+
+        Returns
+        -------
+        float
+        """
+        return self._amplitude
+
+    @property
+    def period(self):
+        """
+        `astropy.units.Quantity`: the full period of the oscillation, in
+        seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._period_s * u.s
+
+    @property
+    def reference_time(self):
+        """
+        `astropy.units.Quantity`: the phase origin, in seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._reference_time_s * u.s
+
+    def __call__(self, time):
+        """
+        The scale factor at `time` (see the class docstring for the
+        formula).
+
+        Parameters
+        ----------
+        time : `astropy.units.Quantity`
+            The time to evaluate (time units). Scalar.
+
+        Returns
+        -------
+        float
+            A value between `mean - amplitude` and `mean + amplitude`.
+            `__init__` already guarantees the lower end of that range is
+            non-negative, so, as with the other scalings, the value is not
+            re-checked on every call.
+        """
+
+        t = time.to_value(u.s)
+
+        phase = 2 * np.pi * (t - self._reference_time_s) / self._period_s
+
+        return float(self._mean + self._amplitude * np.sin(phase))

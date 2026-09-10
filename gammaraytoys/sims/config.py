@@ -61,7 +61,7 @@ sources:                        # required, at least one
     sky_angle: 45 deg           # ... or offaxis_angle, never both
     flux: 1e-3 1/(cm s)
     spectrum: {type: PowerLaw, index: -2, min_energy: 0.2 MeV, max_energy: 10 MeV}
-    scaling: {type: Function, expression: "1 + 0.5*sin(2*pi*t/5400)"}
+    scaling: {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
 ```
 
 In place of the `.ori` path, an orbit to generate:
@@ -83,8 +83,8 @@ spacecraft_history:
 The type names accepted for each kind are listed in `_SPECTRUM_TYPES`,
 `_SCALING_TYPES`, `_SOURCE_TYPES` and `_STRATEGY_TYPES` below. Spectra and
 scalings accept both the short name the plan's sketch uses (`PowerLaw`,
-`Function`) and the full class name (`PowerLawSpectrum`,
-`FunctionScaling`); the short form is what `*_to_config` writes back.
+`Sinusoidal`) and the full class name (`PowerLawSpectrum`,
+`SinusoidalScaling`); the short form is what `*_to_config` writes back.
 
 Round trips
 -----------
@@ -125,14 +125,18 @@ not the Kepler elements that produced them) and the source names.
 `to_config` on a simulator that was not built by `from_config` says so
 rather than guessing.
 
-The expression evaluator
-------------------------
+Why there is no expression syntax
+---------------------------------
 
-`FunctionScaling` built from a configuration string is the one place with
-an obvious injection hazard, and it is handled by `TimeExpression`. The
-defence is an **AST whitelist**, not string matching: see that class for
-what is allowed, what is rejected, and why the string-matching defence the
-plan describes is necessary but not sufficient.
+An earlier draft of this schema let a `scaling` carry a free-form
+expression in `t`, evaluated when the file was loaded. That is a
+configuration file handing the loader a piece of Python to run, which is
+an injection hazard however carefully it is fenced in -- and the fence was
+several hundred lines of this module. The schema instead names **fixed,
+parameterised scalings** (`_SCALING_TYPES` below), every argument of which
+is a number or a quantity: there is nothing in a configuration file left
+to evaluate, and so nothing to sanitise. A shape none of them can make
+belongs in a `Tabulated` scaling's CSV, or in Python.
 """
 
 import ast
@@ -149,14 +153,15 @@ from .earth import Earth
 from .observation_strategy import (ZenithPointing, NadirPointing, InertialPointing,
                                    SpinPointing, TargetedPointing)
 from .reco import SimpleTraditionalReconstructor
-from .scaling import ConstantScaling, TabulatedScaling, FunctionScaling
+from .scaling import (ConstantScaling, TabulatedScaling, BurstScaling,
+                      SinusoidalScaling)
 from .source import (PointSource, IsotropicSource, NearPointSource, ExtendedSource,
                      EarthAlbedoSource)
 from .spacecraft_history import SpacecraftHistory
 from .spectrum import MonoenergeticSpectrum, PowerLawSpectrum, MultiComponentSpectrum
 
 
-__all__ = ['load_config', 'TimeExpression',
+__all__ = ['load_config',
            'detector_from_config', 'detector_to_config',
            'earth_from_config', 'earth_to_config',
            'spectrum_from_config', 'spectrum_to_config',
@@ -335,8 +340,8 @@ def _parse_quantity(text):
     try:
         # `ast.literal_eval` is the safe half of `eval`: it reads number
         # literals and lists of them, and nothing else -- no names, no
-        # calls. The same reason `TimeExpression` below never uses bare
-        # `eval`, for a much smaller job.
+        # calls. Nothing in this module ever reaches for bare `eval`; see
+        # "Why there is no expression syntax" above.
         values = ast.literal_eval(f"[{inside}]")
     except (SyntaxError, ValueError) as err:
         raise ValueError(
@@ -944,514 +949,6 @@ def _searched_dir(path):
 
 
 # ---------------------------------------------------------------------------
-# The expression evaluator
-# ---------------------------------------------------------------------------
-
-
-#: Constants an expression may name, on top of the time variable `t`.
-_EXPRESSION_CONSTANTS = {'pi': np.pi,
-                         'e': np.e}
-
-#: Functions an expression may call. Numpy's, so they behave the same way
-#: they do everywhere else in this package.
-_EXPRESSION_FUNCTIONS = {'sin': np.sin,
-                         'cos': np.cos,
-                         'tan': np.tan,
-                         'arcsin': np.arcsin,
-                         'arccos': np.arccos,
-                         'arctan': np.arctan,
-                         'arctan2': np.arctan2,
-                         'sinh': np.sinh,
-                         'cosh': np.cosh,
-                         'tanh': np.tanh,
-                         'exp': np.exp,
-                         'expm1': np.expm1,
-                         'log': np.log,
-                         'log1p': np.log1p,
-                         'log2': np.log2,
-                         'log10': np.log10,
-                         'sqrt': np.sqrt,
-                         'abs': np.abs,
-                         'sign': np.sign,
-                         'floor': np.floor,
-                         'ceil': np.ceil,
-                         'mod': np.mod,
-                         'power': np.power,
-                         'minimum': np.minimum,
-                         'maximum': np.maximum,
-                         'clip': np.clip,
-                         'heaviside': np.heaviside}
-
-#: Everything an expression may name. `t` is added per call.
-_EXPRESSION_NAMESPACE = dict(_EXPRESSION_CONSTANTS, **_EXPRESSION_FUNCTIONS)
-
-#: Binary operators an expression may use.
-_EXPRESSION_BINARY_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
-                          ast.Mod, ast.Pow)
-
-#: Unary operators an expression may use.
-_EXPRESSION_UNARY_OPS = (ast.UAdd, ast.USub)
-
-#: The name `_pow` is called under inside a rewritten expression. It is
-#: deliberately *not* in `_EXPRESSION_NAMESPACE`, so an expression that
-#: writes it itself is rejected by the whitelist, long before the rewrite.
-_POW_NAME = '_pow'
-
-#: The longest expression a configuration file may hold, checked before it
-#: is parsed.
-#:
-#: Two costs survive everything else on this page, and one rule bounds
-#: both, because both are paid for one character at a time.
-#:
-#: Integers are still arbitrary precision under `*` -- only `**` was taken
-#: away, by `_pow` -- so `9999...*9999...*...` builds an integer as large
-#: as the file is long, at quadratic cost: 200 four-thousand-digit factors
-#: are 781 kB of YAML and 1.5 seconds of CPU for a 2.7-million-bit number.
-#: And `_check_expression_node` and `_FloatPower.visit` both recurse once
-#: per node, so a long chain of anything -- `-------...-1`, `2*2*2*...`
-#: -- runs the interpreter out of stack and raises `RecursionError`, which
-#: is not the `ValueError` this class documents.
-#:
-#: 250 characters, and not the rounder 1000, because the recursion is the
-#: tighter of the two constraints: 496 characters of `-` are already
-#: enough to exhaust CPython's default 1000-frame stack, so a cap has to
-#: sit well below that to be worth having. It is still generous for what
-#: it bounds -- a scaling is a one-liner, and the plan's own example,
-#: `1 + 0.5*sin(2*pi*t/5400)`, is 24 characters.
-_MAX_EXPRESSION_LENGTH = 250
-
-
-def _reject(expression, reason):
-    """
-    Raise the one error every expression rejection raises.
-
-    Parameters
-    ----------
-    expression : str
-        The offending expression, quoted back to the user.
-    reason : str
-        Why it was rejected.
-
-    Raises
-    ------
-    ValueError
-        Always.
-    """
-
-    raise ValueError(
-        f"expression {expression!r} is not allowed: {reason} An expression may "
-        f"use the time variable 't' (in seconds), numbers, the operators "
-        f"+ - * / // % **, the constants {sorted(_EXPRESSION_CONSTANTS)} and "
-        f"calls to {sorted(_EXPRESSION_FUNCTIONS)} -- nothing else.")
-
-
-def _suggest_function(name):
-    """
-    A `did you mean ...?` fragment for a mistyped function name.
-
-    `_suggest` on its own is wrong here often enough to be worse than
-    silence. It judges by edit distance, and a short word is close to
-    everything: it answers both `min(1, t)` and `cosine(t)` with `'sin'`,
-    when `minimum` and `cos` are the names plainly meant, and a wrong
-    suggestion sends a student looking in the wrong place.
-
-    A mistyped function name is nearly always a real name cut short or run
-    long, so look for that first: a whitelisted name that extends what was
-    typed, or that what was typed extends. Of those, take the one closest
-    in length to what was typed -- the least-changed reading of it -- and
-    break a remaining tie alphabetically. Only when nothing is related
-    that way fall back to `_suggest`, which is shared with the key, type
-    and choice messages and is left alone.
-
-    Parameters
-    ----------
-    name : str
-        The name that was called and is not a whitelisted function.
-
-    Returns
-    -------
-    str
-        Either `""` or a fragment like `" Did you mean 'minimum'?"`.
-    """
-
-    related = [candidate for candidate in sorted(_EXPRESSION_FUNCTIONS)
-               if candidate.startswith(name) or name.startswith(candidate)]
-
-    if not related:
-        return _suggest(name, _EXPRESSION_FUNCTIONS)
-
-    # `min` over a sorted list keeps the first of equally close names, so
-    # the alphabetical tie-break costs nothing extra.
-    closest = min(related, key = lambda candidate: abs(len(candidate) - len(name)))
-
-    return f" Did you mean {closest!r}?"
-
-
-def _check_expression_node(node, expression):
-    """
-    Recursively check one node of a parsed expression against the whitelist.
-
-    Whitelist, not blacklist: any node type not named here is rejected,
-    so a syntax this function has never heard of cannot slip through.
-
-    Parameters
-    ----------
-    node : `ast.AST`
-        The node to check.
-    expression : str
-        The whole expression, for error messages.
-
-    Raises
-    ------
-    ValueError
-        If the node, or anything below it, is not allowed.
-    """
-
-    if isinstance(node, ast.Expression):
-        _check_expression_node(node.body, expression)
-
-    elif isinstance(node, ast.Constant):
-        # `True`/`False` are `int`s to `isinstance`, hence the explicit
-        # `bool` check; strings, bytes, `None` and complex are all out.
-        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-            _reject(expression,
-                    f"the constant {node.value!r} is not a real number.")
-
-    elif isinstance(node, ast.Name):
-        if not isinstance(node.ctx, ast.Load):
-            _reject(expression, f"the name {node.id!r} is being assigned to.")
-        if node.id != 't' and node.id not in _EXPRESSION_NAMESPACE:
-            _reject(expression, f"the name {node.id!r} is not defined.")
-        if node.id in _EXPRESSION_FUNCTIONS:
-            # Only reached for a function name used as a *value* -- a call's
-            # own `func` is checked in the `ast.Call` branch and never
-            # recursed into. `sin` on its own is a function object, not a
-            # number: harmless, since `FunctionScaling` refuses to turn it
-            # into a float, but the complaint belongs here, where the
-            # expression is written, not at the first interval of a run.
-            _reject(expression,
-                    f"{node.id!r} is a function and must be called, as "
-                    f"{node.id}(...).")
-
-    elif isinstance(node, ast.BinOp):
-        if not isinstance(node.op, _EXPRESSION_BINARY_OPS):
-            _reject(expression,
-                    f"the operator {type(node.op).__name__} is not allowed.")
-
-        _check_expression_node(node.left, expression)
-        _check_expression_node(node.right, expression)
-
-    elif isinstance(node, ast.UnaryOp):
-        if not isinstance(node.op, _EXPRESSION_UNARY_OPS):
-            _reject(expression,
-                    f"the operator {type(node.op).__name__} is not allowed.")
-        _check_expression_node(node.operand, expression)
-
-    elif isinstance(node, ast.Call):
-        if not isinstance(node.func, ast.Name):
-            _reject(expression, "only a plain function name may be called.")
-        if node.func.id not in _EXPRESSION_FUNCTIONS:
-            _reject(expression,
-                    f"{node.func.id!r} is not a callable function."
-                    f"{_suggest_function(node.func.id)}")
-        if node.keywords:
-            _reject(expression, "keyword arguments are not allowed in a call.")
-        for argument in node.args:
-            if isinstance(argument, ast.Starred):
-                _reject(expression, "argument unpacking is not allowed in a call.")
-            _check_expression_node(argument, expression)
-
-    elif isinstance(node, ast.Attribute):
-        # Named explicitly because it is one of the three holes the plan's
-        # string-matching rule leaves open: `t.real.conjugate()` contains no
-        # dunder at all. Today's namespace happens to expose nothing useful
-        # through an attribute chain, but that is luck, not a property --
-        # adding one convenience (numpy itself, a Quantity) would turn it
-        # into an escape hatch.
-        _reject(expression, "attribute access is not allowed.")
-
-    elif isinstance(node, ast.Lambda):
-        # The second hole: `(lambda: 1)()` contains no dunder either.
-        _reject(expression, "lambdas are not allowed.")
-
-    else:
-        _reject(expression,
-                f"{type(node).__name__} expressions are not allowed.")
-
-
-def _pow(base, exponent):
-    """
-    Raise `base` to `exponent` in floating point, never in integers.
-
-    Every `**` in a configuration expression is rewritten into a call to
-    this function (see `_FloatPower`), so this is the *only* exponentiation
-    a configuration file can reach.
-
-    Why floats: Python's integers are arbitrary-precision, so `2**64` is an
-    exact 65-bit integer, `(2**64)**64` an exact 4097-bit one, and every
-    further nesting *squares* the number of digits. Four or five levels of
-    that -- `(((2**64)**64)**64)**64`, which is one short line in a YAML
-    file -- spend minutes of CPU and gigabytes of memory building a number
-    the run then multiplies by zero and throws away. A float cannot do
-    that: it is 64 bits wide however hard you push it, so the same
-    expression overflows to `inf`, or raises `OverflowError`, in
-    microseconds. Nothing legitimate is lost, because a scaling is a
-    unitless multiplier and therefore a float in the end anyway.
-
-    Parameters
-    ----------
-    base, exponent : float
-        The operands. Converted with `float` before the power is taken, so
-        that an integer written in the file cannot bring arbitrary
-        precision back in through the side door.
-
-    Returns
-    -------
-    float
-
-    Raises
-    ------
-    OverflowError
-        If the result is too large for a float. `TimeExpression.__call__`
-        catches it along with every other arithmetic failure and re-raises
-        a `ValueError` naming the expression and the time.
-    """
-
-    return float(base) ** float(exponent)
-
-
-class _FloatPower(ast.NodeTransformer):
-    """
-    Rewrite every `**` in a checked expression into a `_pow(...)` call.
-
-    Run this after `_check_expression_node` and, crucially, **before**
-    `compile`: CPython folds constant arithmetic at compile time, so a
-    literal `2**64` left in the tree would be evaluated inside `compile`
-    itself and the defence would be worth nothing.
-
-    A rewrite rather than one more rule about the shape of the tree,
-    because the shape rules kept losing. "An exponent may not itself be a
-    `**`" catches `9**9**9**9` but not `(2**64)**64`, where all of the
-    growth is on the *left*. Adding "nor may the base be one" does not
-    catch `((2**64*1)**64*1)**64` either, which breaks the pattern with a
-    harmless `*1`. There is no end to that game, so stop playing it and
-    take away the thing being attacked: the arbitrary-precision integer.
-    """
-
-    def visit_BinOp(self, node):
-        """
-        Parameters
-        ----------
-        node : `ast.BinOp`
-            A binary operation, already checked against the whitelist.
-
-        Returns
-        -------
-        `ast.AST`
-            `node` itself, unless it is a `**`, in which case the
-            equivalent call to `_pow`.
-        """
-
-        # Operands first, so that a `**` nested inside this one is
-        # rewritten too, however deep it is.
-        self.generic_visit(node)
-
-        if not isinstance(node.op, ast.Pow):
-            return node
-
-        return ast.Call(func = ast.Name(id = _POW_NAME, ctx = ast.Load()),
-                        args = [node.left, node.right],
-                        keywords = [])
-
-
-class TimeExpression:
-    """
-    A safe callable built from a configuration expression string, for
-    `FunctionScaling`.
-
-    The variable `t` is the evaluation time **in seconds**, so the plan's
-    own example, `"1 + 0.5*sin(2*pi*t/5400)"`, is a 5400-second period.
-
-    Security
-    --------
-
-    An expression from a configuration file is the one obvious injection
-    hazard in this package. The plan's rule -- no bare `eval`, a namespace
-    of `t` plus whitelisted numpy functions, and reject anything containing
-    `__` -- is necessary but **not sufficient**. Three expressions get
-    through it with no `__` anywhere:
-
-    - `9**9**9**9` hangs the process. Pure arithmetic; there is no string
-      to match on, and no node type to forbid either -- every node in it
-      is one an ordinary expression needs.
-    - `(lambda: 1)()` is allowed. A lambda body is evaluated in the same
-      restricted namespace, but the shape of the attack -- building and
-      calling new code -- has no business here.
-    - `t.real.conjugate()` is allowed, because attribute access is
-      permitted. Nothing reachable through it is useful *today*; that is an
-      accident of which objects the namespace happens to hold, not a
-      property of the defence.
-
-    So the defence here is two things. The first is an **AST whitelist**.
-    The expression is parsed with `ast.parse(..., mode='eval')` and every
-    node is checked against an explicit list (`_check_expression_node`):
-    numbers, names that resolve in the namespace, the arithmetic
-    operators, and calls to whitelisted functions by name. `ast.Attribute`
-    and `ast.Lambda` are rejected outright, and any node type not on the
-    list -- including syntax that does not exist yet -- is rejected by
-    default. The `__` string check is kept as well, as belt and braces; it
-    is not the defence.
-
-    That disposes of the lambda and of the attribute chain, but not of
-    `9**9**9**9`, which is made entirely of things the whitelist has to
-    allow. So the second half of the defence is a **rewrite**: once the
-    tree has been checked, `_FloatPower` turns every `**` in it into a
-    call to `_pow`, which takes the power in floating point. A float is 64
-    bits wide whatever is asked of it, so a runaway power overflows in
-    microseconds instead of filling memory with an exact integer. See
-    `_pow` for why this is done by rewriting the tree rather than by one
-    more rule about its shape.
-
-    Only then is the rewritten tree compiled and evaluated, with
-    `__builtins__` emptied. The rewrite has to come *before* the compile,
-    because the compiler folds constant arithmetic itself and would
-    happily build the huge integer on our behalf.
-
-    One thing is left over once `**` is a float, and it is dealt with
-    first of all, before the expression is even parsed: the expression may
-    be at most `_MAX_EXPRESSION_LENGTH` characters long. Multiplying long
-    integer literals still grows an exact integer, and every walk over the
-    tree recurses once per node, so both the arithmetic and the walker are
-    bounded by bounding the length. See `_MAX_EXPRESSION_LENGTH`.
-    """
-
-    def __init__(self, expression):
-        """
-        Parameters
-        ----------
-        expression : str
-            The expression, e.g. `"1 + 0.5*sin(2*pi*t/5400)"`.
-
-        Raises
-        ------
-        ValueError
-            If `expression` is not a string, is longer than
-            `_MAX_EXPRESSION_LENGTH` characters, is not valid Python
-            syntax, or uses anything outside the whitelist (see the class
-            docstring).
-        """
-
-        if not isinstance(expression, str):
-            raise ValueError(
-                "an expression must be a string, got "
-                f"{type(expression).__name__} ({expression!r}).")
-
-        if len(expression) > _MAX_EXPRESSION_LENGTH:
-            # Before `ast.parse`, because parsing is itself one of the two
-            # things this bounds; see `_MAX_EXPRESSION_LENGTH`. The
-            # expression is not repeated back, unlike every other
-            # rejection here: it is by definition too long to read.
-            raise ValueError(
-                f"an expression may be at most {_MAX_EXPRESSION_LENGTH} "
-                f"characters long, and this one is {len(expression)}. It is "
-                f"not shown here, being far too long to read in an error "
-                f"message.")
-
-        if '__' in expression:
-            # Belt and braces: everything this catches is already caught by
-            # the AST whitelist below (a dunder can only be reached through
-            # an attribute or a name, and both are checked), but it costs
-            # nothing and it is the rule the plan asks for by name.
-            _reject(expression, "it contains '__'.")
-
-        try:
-            tree = ast.parse(expression, mode = 'eval')
-        except SyntaxError as err:
-            raise ValueError(
-                f"expression {expression!r} is not valid syntax "
-                f"({err.msg}).") from err
-
-        _check_expression_node(tree, expression)
-
-        # Float-only `**` (see `_pow`), and before the compile, not after:
-        # the compiler folds constant arithmetic itself, so a `**` still in
-        # the tree here would be evaluated by `compile` below.
-        tree = ast.fix_missing_locations(_FloatPower().visit(tree))
-
-        self._expression = expression
-        self._code = compile(tree, '<gammaraytoys config expression>', 'eval')
-
-    @property
-    def expression(self):
-        """
-        str: the expression this callable was built from.
-
-        Kept so that a `FunctionScaling` built from a configuration can be
-        written back out as one (`scaling_to_config`).
-        """
-        return self._expression
-
-    def __call__(self, time):
-        """
-        Evaluate the expression at a given time.
-
-        Parameters
-        ----------
-        time : `astropy.units.Quantity`
-            The time to evaluate at (time units). Converted to seconds and
-            handed to the expression as `t`.
-
-        Returns
-        -------
-        float
-            The expression's value. `FunctionScaling` is what checks it is
-            finite and non-negative -- that check belongs to the scaling,
-            not to the arithmetic.
-
-        Raises
-        ------
-        TypeError
-            If `time` is not a `Quantity` in time units.
-        ValueError
-            If evaluating raises (a division by zero, a domain error, a
-            power that overflows a float, ...); the message names the
-            expression and the time.
-        """
-
-        if not isinstance(time, u.Quantity):
-            raise TypeError(
-                f"a TimeExpression is evaluated at a Quantity in time units, "
-                f"got {type(time).__name__} ({time!r}).")
-
-        namespace = dict(_EXPRESSION_NAMESPACE)
-        namespace['t'] = time.to_value(u.s)
-        # The name `_FloatPower` rewrote every `**` into. It lives here and
-        # not in `_EXPRESSION_NAMESPACE` so that the whitelist still refuses
-        # an expression that tries to call it by hand.
-        namespace[_POW_NAME] = _pow
-
-        try:
-            # Not a bare `eval`: `self._code` is the compiled form of a tree
-            # every node of which was checked against the whitelist above,
-            # no builtins are reachable, and the only names that resolve are
-            # the ones in `namespace`.
-            return eval(self._code, {'__builtins__': {}}, namespace)
-        except Exception as err:
-            raise ValueError(
-                f"expression {self._expression!r} failed to evaluate at "
-                f"time={time} ({type(err).__name__}: {err}).") from err
-
-    def __repr__(self):
-        """
-        Returns
-        -------
-        str
-            `TimeExpression('...')`.
-        """
-        return f"{type(self).__name__}({self._expression!r})"
-
-
-# ---------------------------------------------------------------------------
 # Detector and Earth
 # ---------------------------------------------------------------------------
 
@@ -1805,8 +1302,10 @@ _SCALING_TYPES = {'Constant': 'Constant',
                   'ConstantScaling': 'Constant',
                   'Tabulated': 'Tabulated',
                   'TabulatedScaling': 'Tabulated',
-                  'Function': 'Function',
-                  'FunctionScaling': 'Function'}
+                  'Burst': 'Burst',
+                  'BurstScaling': 'Burst',
+                  'Sinusoidal': 'Sinusoidal',
+                  'SinusoidalScaling': 'Sinusoidal'}
 
 
 def scaling_from_config(config, where = 'scaling', base_dir = None):
@@ -1817,11 +1316,18 @@ def scaling_from_config(config, where = 'scaling', base_dir = None):
     {type: Constant, scale: 1.0}
     {type: Tabulated, time: "[0, 100, 200] s", scale: [1.0, 2.0, 0.5]}
     {type: Tabulated, file: lightcurve.csv}
-    {type: Function, expression: "1 + 0.5*sin(2*pi*t/5400)"}
+    {type: Burst, start: 100 s, duration: 50 s, amplitude: 20.0}
+    {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
     ```
 
     A tabulated scaling is given either inline (`time` and `scale`
     together) or as a two-column `time_s,scale` CSV `file`, never both.
+
+    A burst's `amplitude` defaults to 1.0, and a sinusoid's
+    `reference_time` -- the time its sine is zero and rising -- to `0 s`.
+    A sinusoid's `period` is the **full** period, so a modulation that
+    repeats once per orbit is written with the orbital period and no
+    factor of `2 * pi` anywhere.
 
     Parameters
     ----------
@@ -1844,9 +1350,10 @@ def scaling_from_config(config, where = 'scaling', base_dir = None):
     ------
     ValueError
         On an unknown type or key, a missing required key, a table given
-        both ways or neither, a table the scaling itself rejects (unsorted
-        times, a negative scale), or an expression outside the whitelist
-        (see `TimeExpression`).
+        both ways or neither, or a value the scaling itself rejects (a
+        table with unsorted times or a negative scale, a burst of zero
+        duration, a sinusoid whose `amplitude` exceeds its `mean` and so
+        goes negative for part of every cycle).
     """
 
     block = _as_mapping(config, where)
@@ -1906,13 +1413,41 @@ def scaling_from_config(config, where = 'scaling', base_dir = None):
         except Exception as err:
             raise ValueError(f"{where}: {err}") from err
 
-    _check_keys(block, where, ('type', 'expression'), required = ('expression',))
+    if name == 'Burst':
+        keys = ('type', 'start', 'duration', 'amplitude')
+        _check_keys(block, where, keys, required = ('start', 'duration'))
 
-    expression = _text(block, 'expression', where, required = True)
+        start = _quantity(block, 'start', where, u.s, required = True)
+        duration = _quantity(block, 'duration', where, u.s, required = True,
+                             minimum = 0)
+        amplitude = _number(block, 'amplitude', where, default = 1.0,
+                            minimum = 0)
+
+        # `minimum = 0` above is inclusive, so a zero duration reaches
+        # `BurstScaling` and is refused there. Re-raising with `where` in
+        # front is what every block here does with a message the class
+        # itself wrote: the class knows what is wrong, only this function
+        # knows where in the file it was written.
+        try:
+            return BurstScaling(start = start, duration = duration,
+                                amplitude = amplitude)
+        except Exception as err:
+            raise ValueError(f"{where}: {err}") from err
+
+    keys = ('type', 'mean', 'amplitude', 'period', 'reference_time')
+    _check_keys(block, where, keys, required = ('mean', 'amplitude', 'period'))
+
+    mean = _number(block, 'mean', where, required = True, minimum = 0)
+    amplitude = _number(block, 'amplitude', where, required = True, minimum = 0)
+    period = _quantity(block, 'period', where, u.s, required = True, minimum = 0)
+    reference_time = _quantity(block, 'reference_time', where, u.s,
+                               default = 0 * u.s)
 
     try:
-        return FunctionScaling(TimeExpression(expression))
-    except ValueError as err:
+        return SinusoidalScaling(mean = mean, amplitude = amplitude,
+                                 period = period,
+                                 reference_time = reference_time)
+    except Exception as err:
         raise ValueError(f"{where}: {err}") from err
 
 
@@ -1936,10 +1471,8 @@ def scaling_to_config(scaling):
     Raises
     ------
     ValueError
-        If `scaling` is not one of the three types a configuration can
-        name, or if it is a `FunctionScaling` wrapping a callable that did
-        not come from a configuration expression -- an arbitrary Python
-        function has no expression to write.
+        If `scaling` is not one of the four types a configuration can
+        name.
     """
 
     if isinstance(scaling, ConstantScaling):
@@ -1950,15 +1483,28 @@ def scaling_to_config(scaling):
                 'time': _format_quantity(scaling.time),
                 'scale': [float(item) for item in scaling.scale]}
 
-    if isinstance(scaling, FunctionScaling):
-        if not isinstance(scaling.function, TimeExpression):
-            raise ValueError(
-                "this FunctionScaling wraps "
-                f"{type(scaling.function).__name__}, not an expression built "
-                "from a configuration, so there is no expression to write "
-                "back out.")
+    if isinstance(scaling, BurstScaling):
+        block = {'type': 'Burst',
+                 'start': _format_quantity(scaling.start),
+                 'duration': _format_quantity(scaling.duration)}
 
-        return {'type': 'Function', 'expression': scaling.function.expression}
+        # Omitted when it is the default, like every other optional key
+        # here: a canonical block says only what is not already implied.
+        if scaling.amplitude != 1.0:
+            block['amplitude'] = float(scaling.amplitude)
+
+        return block
+
+    if isinstance(scaling, SinusoidalScaling):
+        block = {'type': 'Sinusoidal',
+                 'mean': float(scaling.mean),
+                 'amplitude': float(scaling.amplitude),
+                 'period': _format_quantity(scaling.period)}
+
+        if scaling.reference_time != 0 * u.s:
+            block['reference_time'] = _format_quantity(scaling.reference_time)
+
+        return block
 
     raise ValueError(
         f"{type(scaling).__name__} is not a scaling a configuration can "
@@ -2092,7 +1638,7 @@ def source_from_config(config, where = 'source', earth = None, base_dir = None):
     sky_angle: 45 deg           # ... or offaxis_angle, never both
     flux: 1e-3 1/(cm s)
     spectrum: {type: PowerLaw, index: -2, min_energy: 0.2 MeV, max_energy: 10 MeV}
-    scaling: {type: Function, expression: "1 + 0.5*sin(2*pi*t/5400)"}
+    scaling: {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
     ```
 
     The five types and the keys each adds to the common ones (`name`,
