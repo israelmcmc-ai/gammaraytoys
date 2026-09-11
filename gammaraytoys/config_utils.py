@@ -11,13 +11,13 @@ key, resolve a `type` name, format a `Quantity` so it reads back exactly.
 Those primitives live here, at the root of the package, in a module that
 imports nothing from `gammaraytoys` itself. The classes that read and write
 themselves are spread across the package -- `sims/source.py`,
-`sims/spectrum.py`, `sims/scaling.py`, `detectors/tracker/tracker_2d.py` --
-so the helpers they share cannot live inside any one subpackage without the
-others reaching sideways into it. They cannot live in `config.py` either,
-which imports *them*, to wire a whole run together. That is the whole reason
-this file exists and the reason it sits this high up: it is the bottom of
-the layering, and keeping it there is what stops the imports going in a
-circle.
+`sims/spectrum.py`, `sims/scaling.py`, `detectors/tracker/tracker_2d.py`,
+`coordinates/twodim.py` -- so the helpers they share cannot live inside any
+one subpackage without the others reaching sideways into it. They cannot
+live in `config.py` either, which imports *them*, to wire a whole run
+together. That is the whole reason this file exists and the reason it sits
+this high up: it is the bottom of the layering, and keeping it there is what
+stops the imports going in a circle.
 
 Every helper here takes the `where` of the block it is validating -- a
 human-readable path into the file, like "sources[1] (albedo).spectrum" --

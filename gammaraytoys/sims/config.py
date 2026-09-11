@@ -16,6 +16,7 @@ one kind per class:
     sources[i]           `Source.from_config`   / `.to_config(name = ...)`
       .spectrum          `Spectrum.from_config` / `.to_config()`
       .scaling           `SourceScaling.from_config` / `.to_config()`
+      .position          `Cartesian2D.from_config` / `.to_config()`
 
 so that a single piece of a configuration -- one spectrum, one source, one
 scaling -- can be built or written on its own, and so that the class a

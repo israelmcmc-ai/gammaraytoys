@@ -575,7 +575,15 @@ class Source(ABC):
             source_class = IsotropicSource
 
         elif name == 'NearPointSource':
-            kwargs['position'] = _position_from_config(block, where)
+            # `_check_keys` allows 'position' but cannot demand it -- which
+            # keys a type requires differs per type. `Cartesian2D.from_config`
+            # is only ever handed the inner block, so the source block's own
+            # key check stays here, with the block that owns the key.
+            if 'position' not in block:
+                raise ValueError(f"{where}: missing required key 'position'.")
+
+            kwargs['position'] = Cartesian2D.from_config(block['position'],
+                                                         f'{where}.position')
             kwargs['rate'] = _quantity(block, 'rate', where, u.Unit('1 / s'),
                                        minimum = 0)
             source_class = NearPointSource
@@ -664,8 +672,7 @@ class Source(ABC):
             block['width'] = _format_quantity(self.width)
 
         elif isinstance(self, NearPointSource):
-            block['position'] = {'x': _format_quantity(self.position.x),
-                                 'y': _format_quantity(self.position.y)}
+            block['position'] = self.position.to_config()
 
         elif isinstance(self, EarthAlbedoSource):
             block['emissivity'] = _format_quantity(self.emissivity)
@@ -2897,43 +2904,6 @@ _SOURCE_CLASSES = {'PointSource': PointSource,
                    'NearPointSource': NearPointSource,
                    'ExtendedSource': ExtendedSource,
                    'EarthAlbedoSource': EarthAlbedoSource}
-
-
-def _position_from_config(block, where):
-    """
-    Read a near-field source's `position` block into a `Cartesian2D`.
-
-    ```yaml
-    position: {x: 0 cm, y: 1 cm}
-    ```
-
-    Parameters
-    ----------
-    block : dict
-        The source block, which must carry a `position` key.
-    where : str
-        Label for the source block in error messages.
-
-    Returns
-    -------
-    `Cartesian2D`
-
-    Raises
-    ------
-    ValueError
-        If `position` is missing, is not a block of `x` and `y`, or if
-        either coordinate is not a length.
-    """
-
-    if 'position' not in block:
-        raise ValueError(f"{where}: missing required key 'position'.")
-
-    inner_where = f"{where}.position"
-    inner = _as_mapping(block['position'], inner_where)
-    _check_keys(inner, inner_where, ('x', 'y'), required = ('x', 'y'))
-
-    return Cartesian2D(_quantity(inner, 'x', inner_where, u.cm, required = True),
-                       _quantity(inner, 'y', inner_where, u.cm, required = True))
 
 
 def _common_source_kwargs(block, where, base_dir = None):

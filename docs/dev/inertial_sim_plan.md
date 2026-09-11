@@ -740,7 +740,8 @@ by hand with clear messages; do not add a schema-validation dependency.
 Each kind reads and writes **itself**: a `from_config` classmethod and a `to_config`
 method on the class the block describes — `Source.from_config(block)` /
 `src.to_config(name = ...)`, and likewise on `Spectrum`, `SourceScaling`, `Earth`,
-`ObservationStrategy`, `Reconstructor`, `SpacecraftHistory` and `ToyTracker2D`. Reading
+`ObservationStrategy`, `Reconstructor`, `SpacecraftHistory`, `ToyTracker2D` and
+`Cartesian2D`. Reading
 is done on the base class, which picks the subclass the block's `type` names; calling
 it on a concrete class pins the answer down and refuses a block whose `type` says
 otherwise. `config.py` keeps the schema documentation and `load_config`, and the
