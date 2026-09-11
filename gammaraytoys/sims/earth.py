@@ -3,7 +3,7 @@ import astropy.units as u
 from astropy.constants import R_earth
 import matplotlib.pyplot as plt
 
-from .config_utils import _as_mapping, _check_keys, _format_quantity, _quantity
+from ..config_utils import _as_mapping, _check_keys, _format_quantity, _quantity
 
 
 class Earth:

@@ -4,9 +4,9 @@ import numpy as np
 from gammaraytoys import Material
 from astropy import units as u
 from gammaraytoys.sims import Photon, Compton, Absorption
-from gammaraytoys.sims.config_utils import (_as_mapping, _check_keys, _collapse,
-                                            _format_quantity, _number, _quantity,
-                                            _text, _type_name)
+from gammaraytoys.config_utils import (_as_mapping, _check_keys, _collapse,
+                                       _format_quantity, _number, _quantity,
+                                       _text, _type_name)
 from gammaraytoys.physics import ComptonPhysics2D
 from gammaraytoys.coordinates import Cartesian2D
 from scipy.stats import norm, expon

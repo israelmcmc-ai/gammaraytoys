@@ -6,7 +6,7 @@ from astropy.coordinates import Angle
 import numpy as np
 
 from .config import load_config, _config_base_dir
-from .config_utils import _as_mapping, _boolean, _check_keys, _integer, _text
+from ..config_utils import _as_mapping, _boolean, _check_keys, _integer, _text
 from .earth import Earth
 from .reco import Reconstructor, SimpleTraditionalReconstructor
 from .source import Source

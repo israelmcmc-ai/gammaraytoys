@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 
 from .earth import Earth
 from .observation_strategy import ObservationStrategy, ZenithPointing
-from .config_utils import (_as_mapping, _check_keys, _format_quantity, _number,
-                           _quantity, _resolve_path, _searched_dir, _type_name)
+from ..config_utils import (_as_mapping, _check_keys, _format_quantity, _number,
+                            _quantity, _resolve_path, _searched_dir, _type_name)
 
 # Column names of the .ori file format (Section 4.1). Units are baked into
 # the names themselves.

@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 import numpy as np
 import astropy.units as u
 
-from .config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
-                           _format_quantity, _quantity)
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _quantity)
 
 
 class ObservationStrategy(ABC):

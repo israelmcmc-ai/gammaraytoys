@@ -170,7 +170,7 @@ from pathlib import Path
 
 import yaml
 
-from .config_utils import _as_mapping
+from ..config_utils import _as_mapping
 
 
 __all__ = ['load_config']

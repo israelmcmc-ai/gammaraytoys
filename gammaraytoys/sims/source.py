@@ -12,9 +12,9 @@ from scipy.stats import vonmises
 from scipy.integrate import quad, cumulative_trapezoid
 from .earth import Earth
 from .scaling import SourceScaling, ConstantScaling
-from .config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
-                           _format_quantity, _integer, _number, _quantity,
-                           _text)
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _integer, _number, _quantity,
+                            _text)
 
 # `ToyTracker2D.plot()` hardcodes its data coordinates to this unit -- every
 # source marker drawn on top of it must match, or it lands in the right

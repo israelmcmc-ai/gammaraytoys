@@ -4,8 +4,8 @@ import numpy as np
 import astropy.units as u
 from scipy.stats.sampling import NumericalInverseHermite
 
-from .config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
-                           _format_quantity, _number, _quantity)
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _number, _quantity)
 
 class Spectrum(ABC):
 

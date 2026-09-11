@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from gammaraytoys.physics import ComptonPhysics2D
 import numpy as np
 
-from .config_utils import _as_mapping, _check_keys, _dispatch_type_name
+from ..config_utils import _as_mapping, _check_keys, _dispatch_type_name
 
 class Reconstructor(ABC):
 

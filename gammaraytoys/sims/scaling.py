@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 import astropy.units as u
 
-from .config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
-                           _format_quantity, _number, _quantity, _resolve_path,
-                           _searched_dir, _text)
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _number, _quantity, _resolve_path,
+                            _searched_dir, _text)
 
 
 __all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling',
