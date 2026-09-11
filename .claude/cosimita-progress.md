@@ -42,7 +42,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
 | 6 | Time-dependent scaling + event CSV I/O | merged | **Merged** (PR #20) |
-| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | **Open (PR #21)** — reviewed, review findings fixed and re-tested. 637 tests green. |
+| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | **Open (PR #21)** — maintainer review addressed: expression evaluator removed entirely, `*_from_config` moved onto the classes. 570 tests green. |
 
 Side PRs, outside the seven:
 
@@ -410,6 +410,51 @@ backend and silently strips every figure while still exiting 0.
   `NOT rejected (!)`. Any PR that changes behaviour a notebook teaches has to re-run it.
 - **Brief the reviewer to attack, not to read.** The three findings that mattered all came
   from the instruction "decide whether you can defeat it — try", with measurements demanded.
+
+## Lessons from PR 7's maintainer review
+
+- **The cheapest way to secure an input is to stop accepting it.** PR 7 spent an
+  entire review round hardening a free-form expression evaluator, and the defence
+  was beaten twice anyway. The maintainer's answer was to delete the feature: fixed
+  scalings with named parameters (`Burst`, `Sinusoidal`) instead of a formula. That
+  removed 508 lines of `config.py`, an 891-line test file, and the whole attack
+  surface. When a review finds a hole in a defence, "is this input worth accepting
+  at all?" comes before "how do we defend it better?".
+- **Say what a trade cost, in the docs, rather than quietly dropping the feature.**
+  Notebook 06's section on the evaluator became "Why there is no expression syntax",
+  naming both sides: the defence that failed, and the price of fixed shapes (a new
+  shape needs a subclass, not a line in the config).
+- **A green suite does not mean a rename was safe.** A `\bword\b` rename during the
+  classmethod refactor damaged four *strings* rather than identifiers, and no test
+  asserted any of them, so it survived three commits green. Caught only by
+  AST-diffing every moved function body against its original. For a pure move,
+  diff the bodies -- do not trust the tests to notice.
+- **Verify a "pure refactor" as one.** Beyond the suite, 25 paired cases (18 error
+  paths, 7 round trips) were run through the old and new APIs and compared including
+  exception type and message string. That is what makes "behaviour is unchanged" a
+  claim rather than a hope.
+- **Breaking an import cycle beats deferring it.** Moving `*_from_config` onto the
+  classes created a cycle (`config.py` imports the classes; the classes want its
+  validators). Extracting the primitives into a dependency-free `config_utils.py`
+  removed the cycle instead of hiding it behind function-body imports.
+- **Guard inherited dispatch classmethods.** `Source.from_config` dispatches on
+  `type`, so `PointSource.from_config` would silently return an `IsotropicSource`.
+  The base checks `cls` and refuses a mismatch.
+- **A half-open window is a decision, not a detail.** `BurstScaling` uses
+  `start <= t < start + duration` specifically to agree with `TabulatedScaling`'s
+  right-continuity. Two scalings disagreeing about their edges would be a trap.
+- **Validate a shape that can go negative at construction.** `SinusoidalScaling`
+  refuses `amplitude > mean`, because otherwise it is a negative Poisson mean deep
+  inside `run_events` -- the same failure the review found for a negative `flux`.
+- **CI's version matrix catches what one venv cannot.** The schema's array-with-unit
+  string silently required a newer astropy than `pyproject.toml` asks for: 39 tests
+  failed on Python 3.10 only. Fixed by parsing the bracket by hand. When a project
+  supports a version range with unpinned deps, a local green suite proves one point
+  in that space.
+- **A stale PR description misleads the review.** #21's body twice said a thing was
+  "not fixed" that had been fixed at the maintainer's request, and omitted the
+  portability fix entirely. Rewrite the body when the branch moves, not just when
+  the PR opens.
 
 ## Known environment traps for agents
 
