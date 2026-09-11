@@ -4,9 +4,25 @@ Section 7): one file that names a detector, an Earth, a spacecraft history
 and a list of sources, and builds the whole run from it.
 
 The entry points are `Simulator.from_config` and
-`InertialSimulator.from_config`; everything in this module is the machinery
-behind them, exposed so that a single piece of a configuration -- one
-spectrum, one source, one scaling -- can be built or written on its own.
+`InertialSimulator.from_config`. This module is where the schema below is
+written down; the machinery that reads it lives on the classes themselves,
+one kind per class:
+
+    detector             `ToyTracker2D.from_config`   / `.to_config()`
+    earth                `Earth.from_config`          / `.to_config()`
+    reconstructor        `Reconstructor.from_config`  / `.to_config()`
+    spacecraft_history   `SpacecraftHistory.from_config`
+    observation_strategy `ObservationStrategy.from_config` / `.to_config()`
+    sources[i]           `Source.from_config`   / `.to_config(name = ...)`
+      .spectrum          `Spectrum.from_config` / `.to_config()`
+      .scaling           `SourceScaling.from_config` / `.to_config()`
+
+so that a single piece of a configuration -- one spectrum, one source, one
+scaling -- can be built or written on its own, and so that the class a
+reader is already looking at is the one that documents its own block.
+
+What is left here is `load_config`, which turns a path or a mapping into a
+plain configuration mapping, and the schema itself.
 
 Python API only: there is no console script and no `python -m`.
 
@@ -80,24 +96,33 @@ spacecraft_history:
     type: ZenithPointing
 ```
 
-The type names accepted for each kind are listed in `_SPECTRUM_TYPES`,
-`_SCALING_TYPES`, `_SOURCE_TYPES` and `_STRATEGY_TYPES` below. Spectra and
-scalings accept both the short name the plan's sketch uses (`PowerLaw`,
-`Sinusoidal`) and the full class name (`PowerLawSpectrum`,
-`SinusoidalScaling`); the short form is what `*_to_config` writes back.
+The type names accepted for each kind are listed at the bottom of the file
+that kind lives in: `_SPECTRUM_TYPES` in `spectrum.py`, `_SCALING_TYPES` in
+`scaling.py`, `_SOURCE_TYPES` in `source.py`, `_STRATEGY_TYPES` in
+`observation_strategy.py`. Spectra and scalings accept both the short name
+the plan's sketch uses (`PowerLaw`, `Sinusoidal`) and the full class name
+(`PowerLawSpectrum`, `SinusoidalScaling`); the short form is what
+`to_config` writes back.
 
 Round trips
 -----------
 
-Every kind has a `*_from_config` / `*_to_config` pair, and
+Every kind has a `from_config` classmethod and a `to_config` method, and
 `Simulator.to_config()` / `InertialSimulator.to_config()` write a whole
-run back out. `*_to_config` emits a **canonical** configuration: it omits
+run back out. `to_config` emits a **canonical** configuration: it omits
 keys left at their default, writes quantities in the unit they are held in,
-and resolves the aliases above. So `x_to_config(x_from_config(config))`
+and resolves the aliases above. So `X.from_config(config).to_config()`
 equals `config` for a configuration already written in canonical form, and
 is otherwise the canonical spelling of the same thing -- feeding it back
-through `*_from_config` gives an equal object, and writing that out again
+through `X.from_config` gives an equal object, and writing that out again
 gives an identical configuration.
+
+Reading is done on the base class of each kind, which picks the subclass
+the block's `type` names: `Source.from_config` hands back a `PointSource`
+or an `IsotropicSource` as the block says. Calling it on a concrete class
+instead pins the answer down -- `PointSource.from_config` builds a
+`PointSource` and refuses a block whose `type` says otherwise, rather than
+quietly handing back the other class.
 
 Sibling files
 -------------
@@ -113,7 +138,7 @@ mapping: it came from no file, so there is no directory to resolve
 against, and a relative path there falls back to the process' working
 directory, as it always has.
 
-`*_to_config` writes a path back **exactly as it was given**. Rewriting
+`to_config` writes a path back **exactly as it was given**. Rewriting
 `iss.ori` as `/home/someone/runs/iss.ori` on the way out would turn a
 portable configuration into a machine-specific one.
 
@@ -133,10 +158,11 @@ expression in `t`, evaluated when the file was loaded. That is a
 configuration file handing the loader a piece of Python to run, which is
 an injection hazard however carefully it is fenced in -- and the fence was
 several hundred lines of this module. The schema instead names **fixed,
-parameterised scalings** (`_SCALING_TYPES` below), every argument of which
-is a number or a quantity: there is nothing in a configuration file left
-to evaluate, and so nothing to sanitise. A shape none of them can make
-belongs in a `Tabulated` scaling's CSV, or in Python.
+parameterised scalings** (`_SCALING_TYPES` in `scaling.py`), every
+argument of which is a number or a quantity: there is nothing in a
+configuration file left to evaluate, and so nothing to sanitise. A shape
+none of them can make belongs in a `Tabulated` scaling's CSV, or in
+Python.
 """
 
 from collections.abc import Mapping

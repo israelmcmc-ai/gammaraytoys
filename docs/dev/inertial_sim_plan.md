@@ -737,6 +737,16 @@ Every unit-bearing value is a string astropy parses. Unknown keys are an error, 
 warning — a silently ignored typo in a config file is a debugging nightmare. Validate
 by hand with clear messages; do not add a schema-validation dependency.
 
+Each kind reads and writes **itself**: a `from_config` classmethod and a `to_config`
+method on the class the block describes — `Source.from_config(block)` /
+`src.to_config(name = ...)`, and likewise on `Spectrum`, `SourceScaling`, `Earth`,
+`ObservationStrategy`, `Reconstructor`, `SpacecraftHistory` and `ToyTracker2D`. Reading
+is done on the base class, which picks the subclass the block's `type` names; calling
+it on a concrete class pins the answer down and refuses a block whose `type` says
+otherwise. `config.py` keeps the schema documentation and `load_config`, and the
+validation primitives the readers share live in `config_utils.py`, which imports
+nothing from the package so that no class needs to import `config.py` back.
+
 An earlier draft of this section let a `scaling` carry a free-form expression in `t`,
 which the loader evaluated — an obvious injection hazard, and one that took an AST
 whitelist and a few hundred lines of `config.py` to survive. The maintainer's decision

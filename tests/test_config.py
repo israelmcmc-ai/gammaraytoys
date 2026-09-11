@@ -1178,11 +1178,11 @@ def test_random_seed_is_applied_after_everything_is_built(monkeypatch):
     # follows is shifted.
     real_from_config = Spectrum.from_config
 
-    def spectrum_from_config_that_draws(*args, **kwargs):
+    def from_config_that_draws(*args, **kwargs):
         np.random.uniform(size=3)
         return real_from_config(*args, **kwargs)
 
-    monkeypatch.setattr(Spectrum, 'from_config', spectrum_from_config_that_draws)
+    monkeypatch.setattr(Spectrum, 'from_config', from_config_that_draws)
 
     config = dict(_minimal_detector_frame_config(), random_seed=2026)
 
