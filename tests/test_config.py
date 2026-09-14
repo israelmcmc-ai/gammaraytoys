@@ -32,12 +32,6 @@ from gammaraytoys.sims import (
     TabulatedScaling, TargetedPointing, ZenithPointing,
     load_config,
 )
-# Reading an array-with-unit string back is the one thing `u.Quantity` cannot
-# do on every astropy this project supports: parsing a bracketed list out of a
-# string is a recent feature, and `pyproject.toml` pins no version. The library
-# parses that form itself for exactly this reason, so the three assertions
-# below that read one back use the same parser rather than `u.Quantity`.
-from gammaraytoys.config_utils import _parse_quantity
 from gammaraytoys.detectors import ToyTracker2D
 
 
@@ -1716,11 +1710,11 @@ def test_a_per_layer_detector_keeps_every_layers_own_value():
 
     # Layer by layer, and in order: a detector written back out with only its
     # first layer's numbers would be a different instrument.
-    assert _parse_quantity(out['layer_thickness']).to_value(u.mm) == pytest.approx(
+    assert u.Quantity(out['layer_thickness']).to_value(u.mm) == pytest.approx(
         [1.0, 2.0, 3.0, 4.0, 3.0, 2.0])
     assert out['energy_resolution'] == pytest.approx(
         [0.01, 0.02, 0.03, 0.04, 0.03, 0.02])
-    assert _parse_quantity(out['energy_threshold']).to_value(u.keV) == pytest.approx(
+    assert u.Quantity(out['energy_threshold']).to_value(u.keV) == pytest.approx(
         [20.0, 25.0, 30.0, 35.0, 30.0, 25.0])
 
 
@@ -1747,7 +1741,7 @@ def test_a_per_layer_detector_round_trips_inside_a_whole_configuration():
     simulator = Simulator.from_config(config)
     out1 = simulator.to_config()
 
-    assert _parse_quantity(out1['detector']['layer_thickness']).to_value(u.mm) == (
+    assert u.Quantity(out1['detector']['layer_thickness']).to_value(u.mm) == (
         pytest.approx([1.0, 2.0, 3.0, 4.0, 3.0, 2.0]))
 
     assert Simulator.from_config(out1).to_config() == out1
