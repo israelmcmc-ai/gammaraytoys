@@ -10,13 +10,17 @@ readme = "README.md"
 authors = [
     { name = "Israel Martinez", email = "imc@umd.edu" },
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "histpy",
     "matplotlib",
     "numpy",
     "scipy",
-    "astropy",
+    # 8.0 is the first release whose `Quantity(str)` parses the bracketed
+    # array form ("[30, 0, 1] cm") the configuration schema is written in.
+    # Every 7.x installs happily on Python 3.12 and cannot parse it, so the
+    # floor has to be stated here, not implied by the Python version.
+    "astropy>=8.0",
     "pandas",
     "mhealpy",
     "pyyaml",
@@ -41,7 +45,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 # Tutorial/example notebooks are pedagogical, cell-order-dependent material,
 # not library code -- hold them to the reader's narrative, not a linter.
 extend-exclude = ["docs"]
