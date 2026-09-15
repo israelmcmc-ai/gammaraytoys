@@ -3,6 +3,8 @@ import astropy.units as u
 from astropy.constants import R_earth
 import matplotlib.pyplot as plt
 
+from ..config_utils import _as_mapping, _check_keys, _format_quantity, _quantity
+
 
 class Earth:
     """
@@ -22,6 +24,62 @@ class Earth:
         """
 
         self.radius = radius if radius is not None else R_earth.to(u.km)
+
+    @classmethod
+    def from_config(cls, config, where = 'earth'):
+        """
+        Build an `Earth` from its configuration block.
+
+        ```yaml
+        radius: 6371 km
+        ```
+
+        Parameters
+        ----------
+        config : mapping
+            The `earth` block. An empty block is legal and gives the default
+            `Earth()` -- astropy's nominal `R_earth`, which is 6378.1 km, not
+            the 6371 km the plan's own sketch uses. Write the radius out.
+        where : str
+            Label for this block in error messages.
+
+        Returns
+        -------
+        `Earth`
+
+        Raises
+        ------
+        ValueError
+            On an unknown key, or a radius that is not a positive length.
+        """
+
+        block = _as_mapping(config, where)
+        _check_keys(block, where, ('radius',))
+
+        radius = _quantity(block, 'radius', where, u.km)
+
+        if radius is not None and radius <= 0 * radius.unit:
+            raise ValueError(f"{where}: key 'radius' must be positive, got {radius}.")
+
+        return cls(radius = radius)
+    def to_config(self):
+        """
+        Write this Earth back out as a configuration block.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            `{'radius': ...}`. The radius is always written, including when the
+            configuration that built this Earth left it out: which planet a run
+            used is exactly the thing this project has already shipped a silent
+            disagreement about.
+        """
+
+        return {'radius': _format_quantity(self.radius)}
 
     def _check_orbit_radius(self, orbit_radius_value, orbit_radius_quantity):
         """

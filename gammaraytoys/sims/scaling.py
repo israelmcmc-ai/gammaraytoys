@@ -16,8 +16,13 @@ import numpy as np
 import pandas as pd
 import astropy.units as u
 
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _number, _quantity, _resolve_path,
+                            _searched_dir, _text)
 
-__all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling', 'FunctionScaling']
+
+__all__ = ['SourceScaling', 'ConstantScaling', 'TabulatedScaling',
+           'BurstScaling', 'SinusoidalScaling']
 
 
 def _validate_scale(value, what):
@@ -89,6 +94,220 @@ class SourceScaling(ABC):
             A finite, non-negative, unitless multiplier.
         """
         pass
+
+
+    @classmethod
+    def from_config(cls, config, where = 'scaling', base_dir = None):
+        """
+        Build a `SourceScaling` from its configuration block.
+
+        ```yaml
+        {type: Constant, scale: 1.0}
+        {type: Tabulated, time: "[0, 100, 200] s", scale: [1.0, 2.0, 0.5]}
+        {type: Tabulated, file: lightcurve.csv}
+        {type: Burst, start: 100 s, duration: 50 s, amplitude: 20.0}
+        {type: Sinusoidal, mean: 1.0, amplitude: 0.5, period: 5400 s}
+        ```
+
+        A tabulated scaling is given either inline (`time` and `scale`
+        together) or as a two-column `time_s,scale` CSV `file`, never both.
+
+        A burst's `amplitude` defaults to 1.0, and a sinusoid's
+        `reference_time` -- the time its sine is zero and rising -- to `0 s`.
+        A sinusoid's `period` is the **full** period, so a modulation that
+        repeats once per orbit is written with the orbital period and no
+        factor of `2 * pi` anywhere.
+
+        Called on `SourceScaling`, the block's `type` chooses the class.
+        Called on one of the four concrete classes, that class is what gets
+        built: `type` may name it or be left out, and naming a different one
+        raises rather than quietly handing back the other class.
+
+        Parameters
+        ----------
+        config : mapping
+            The `scaling` block.
+        where : str
+            Label for this block in error messages.
+        base_dir : `pathlib.Path` or None
+            The directory a relative `file` is taken relative to -- the
+            directory of the configuration file, when there was one. `None`
+            (the default, and what a configuration handed in as a mapping
+            gets) leaves a relative path resolving against the working
+            directory. An absolute `file` is unaffected either way.
+
+        Returns
+        -------
+        `SourceScaling`
+
+        Raises
+        ------
+        ValueError
+            On an unknown type or key, a missing required key, a table given
+            both ways or neither, or a value the scaling itself rejects (a
+            table with unsorted times or a negative scale, a burst of zero
+            duration, a sinusoid whose `amplitude` exceeds its `mean` and so
+            goes negative for part of every cycle).
+        """
+
+        block = _as_mapping(config, where)
+        name = _dispatch_type_name(cls, SourceScaling, block, where, _SCALING_TYPES,
+                                   _SCALING_CLASSES, 'scaling')
+
+        if name == 'Constant':
+            _check_keys(block, where, ('type', 'scale'))
+
+            return ConstantScaling(
+                scale = _number(block, 'scale', where, default = 1.0, minimum = 0))
+
+        if name == 'Tabulated':
+            _check_keys(block, where, ('type', 'time', 'scale', 'file'))
+
+            has_file = 'file' in block
+            has_inline = 'time' in block or 'scale' in block
+
+            if has_file and has_inline:
+                raise ValueError(
+                    f"{where}: a Tabulated scaling is given either as a 'file' or "
+                    f"as inline 'time' and 'scale', not both.")
+
+            if has_file:
+                filename = _text(block, 'file', where, required = True)
+                path = _resolve_path(filename, base_dir)
+                try:
+                    return TabulatedScaling.open(path)
+                except FileNotFoundError as err:
+                    # Still a FileNotFoundError -- "the file is missing" is a
+                    # different problem from "the file is wrong", and a caller
+                    # may reasonably want to tell them apart. Only the message
+                    # changes: on its own it says nothing but the path, which in
+                    # a file with a dozen scalings in it does not say which one,
+                    # nor where it was looked for.
+                    raise FileNotFoundError(
+                        f"{where}: key 'file' = {filename!r} does not exist "
+                        f"(looked in {_searched_dir(path)}).") from err
+                except Exception as err:
+                    raise ValueError(
+                        f"{where}: could not read the table from {filename!r} "
+                        f"({type(err).__name__}: {err}).") from err
+
+            if not has_inline:
+                raise ValueError(
+                    f"{where}: a Tabulated scaling needs either a 'file' or inline "
+                    f"'time' and 'scale'.")
+
+            time = _quantity(block, 'time', where, u.s, required = True, shape = 'array')
+            scale = _number(block, 'scale', where, required = True, minimum = 0,
+                            shape = 'any')
+
+            if np.ndim(scale) == 0:
+                scale = [scale]
+
+            try:
+                return TabulatedScaling(time = time, scale = scale)
+            except Exception as err:
+                raise ValueError(f"{where}: {err}") from err
+
+        if name == 'Burst':
+            keys = ('type', 'start', 'duration', 'amplitude')
+            _check_keys(block, where, keys, required = ('start', 'duration'))
+
+            start = _quantity(block, 'start', where, u.s, required = True)
+            duration = _quantity(block, 'duration', where, u.s, required = True,
+                                 minimum = 0)
+            amplitude = _number(block, 'amplitude', where, default = 1.0,
+                                minimum = 0)
+
+            # `minimum = 0` above is inclusive, so a zero duration reaches
+            # `BurstScaling` and is refused there. Re-raising with `where` in
+            # front is what every block here does with a message the class
+            # itself wrote: the class knows what is wrong, only this method
+            # knows where in the file it was written.
+            try:
+                return BurstScaling(start = start, duration = duration,
+                                    amplitude = amplitude)
+            except Exception as err:
+                raise ValueError(f"{where}: {err}") from err
+
+        keys = ('type', 'mean', 'amplitude', 'period', 'reference_time')
+        _check_keys(block, where, keys, required = ('mean', 'amplitude', 'period'))
+
+        mean = _number(block, 'mean', where, required = True, minimum = 0)
+        amplitude = _number(block, 'amplitude', where, required = True, minimum = 0)
+        period = _quantity(block, 'period', where, u.s, required = True, minimum = 0)
+        reference_time = _quantity(block, 'reference_time', where, u.s,
+                                   default = 0 * u.s)
+
+        try:
+            return SinusoidalScaling(mean = mean, amplitude = amplitude,
+                                     period = period,
+                                     reference_time = reference_time)
+        except Exception as err:
+            raise ValueError(f"{where}: {err}") from err
+
+    def to_config(self):
+        """
+        Write this scaling back out as a configuration block.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A block `SourceScaling.from_config` reads back into an equal
+            scaling. A `TabulatedScaling` is always written inline,
+            including when it was read from a file: the table is data, and
+            inlining it keeps the written configuration self-contained.
+
+        Raises
+        ------
+        ValueError
+            If this is not one of the four types a configuration can name.
+            The four are handled below; anything else that subclasses
+            `SourceScaling` falls through to the raise, which is the only
+            honest answer -- a configuration has no `type` name for it.
+        """
+
+        # One method rather than four overrides, so that the whole written
+        # schema for scalings reads top to bottom in one place, next to the
+        # `from_config` that reads it back.
+        if isinstance(self, ConstantScaling):
+            return {'type': 'Constant', 'scale': float(self.scale)}
+
+        if isinstance(self, TabulatedScaling):
+            return {'type': 'Tabulated',
+                    'time': _format_quantity(self.time),
+                    'scale': [float(item) for item in self.scale]}
+
+        if isinstance(self, BurstScaling):
+            block = {'type': 'Burst',
+                     'start': _format_quantity(self.start),
+                     'duration': _format_quantity(self.duration)}
+
+            # Omitted when it is the default, like every other optional key
+            # here: a canonical block says only what is not already implied.
+            if self.amplitude != 1.0:
+                block['amplitude'] = float(self.amplitude)
+
+            return block
+
+        if isinstance(self, SinusoidalScaling):
+            block = {'type': 'Sinusoidal',
+                     'mean': float(self.mean),
+                     'amplitude': float(self.amplitude),
+                     'period': _format_quantity(self.period)}
+
+            if self.reference_time != 0 * u.s:
+                block['reference_time'] = _format_quantity(self.reference_time)
+
+            return block
+
+        raise ValueError(
+            f"{type(self).__name__} is not a scaling a configuration can "
+            f"describe; the types that are: "
+            f"{sorted(set(_SCALING_TYPES.values()))}.")
 
 
 class ConstantScaling(SourceScaling):
@@ -219,6 +438,36 @@ class TabulatedScaling(SourceScaling):
         self._time_s = time_s
         self._scale = scale
 
+    @property
+    def time(self):
+        """
+        `astropy.units.Quantity`: the breakpoint times, in seconds.
+
+        A copy, not the stored array: the lookup in `__call__` assumes the
+        times are still strictly increasing, and handing out the array
+        itself would let a caller break that assumption in place, long
+        after `__init__` validated it.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._time_s.copy() * u.s
+
+    @property
+    def scale(self):
+        """
+        numpy.ndarray: the scale at (and after) each breakpoint.
+
+        A copy, for the same reason as `time`: every value was validated
+        finite and non-negative at construction.
+
+        Returns
+        -------
+        numpy.ndarray
+        """
+        return self._scale.copy()
+
     @classmethod
     def open(cls, filename):
         """
@@ -285,55 +534,296 @@ class TabulatedScaling(SourceScaling):
         return float(self._scale[idx])
 
 
-class FunctionScaling(SourceScaling):
+class BurstScaling(SourceScaling):
     """
-    A scaling that wraps an arbitrary callable of time.
+    A scaling that is zero everywhere except inside a single window: a
+    burst that switches on at `start`, holds `amplitude` for `duration`,
+    and is `0.0` before and after. This is the shape a transient has in a
+    teaching run -- a gamma-ray burst against a quiet background.
+
+    The window is **half-open**, `start <= t < start + duration`: the
+    instant the burst starts belongs to the burst, and the instant it ends
+    belongs to what comes after. That is not an arbitrary choice.
+    `TabulatedScaling` above is already right-continuous -- a breakpoint
+    belongs to the row *at* it -- and two scalings in the same package
+    disagreeing about which side of an edge a time falls on would be a
+    trap: a burst and a table describing the same lightcurve would differ
+    by one interval, at exactly the times a user is most likely to check
+    by hand.
     """
 
-    def __init__(self, function):
+    def __init__(self, start, duration, amplitude = 1.0):
         """
         Parameters
         ----------
-        function : callable
-            `function(time) -> float`, where `time` is an
-            `astropy.units.Quantity` (time units) and the return value is a
-            finite, non-negative real number. Validated on every call, not
-            at construction (the function itself is not evaluated here).
-        """
-
-        self.function = function
-
-    def __call__(self, time):
-        """
-        The scale factor at `time`: `self.function(time)`, validated.
-
-        Parameters
-        ----------
-        time : `astropy.units.Quantity`
-            The time to evaluate (time units).
-
-        Returns
-        -------
-        float
-            `self.function(time)`, as a finite, non-negative `float`.
+        start : `astropy.units.Quantity`
+            The time the burst switches on (time units). Any finite time,
+            including a negative one.
+        duration : `astropy.units.Quantity`
+            How long the burst lasts (time units). Must be positive.
+        amplitude : float
+            The scale factor while the burst lasts. Must be a finite,
+            non-negative number. Defaults to 1.0.
 
         Raises
         ------
         ValueError
-            If `self.function(time)` is not convertible to `float`, or is
-            not finite and non-negative. A negative scaling would give a
-            negative Poisson mean and blow up deep inside the run, far from
-            this callable; catching it here names the actual offender.
+            If `start` is not finite, if `duration` is not positive (a
+            zero or negative window is never what a user meant, and would
+            make a burst that never happens), or if `amplitude` is not
+            finite and non-negative.
         """
 
-        value = self.function(time)
+        start_s = float(start.to_value(u.s))
+        duration_s = float(duration.to_value(u.s))
 
-        try:
-            value = float(value)
-        except (TypeError, ValueError) as err:
+        if not np.isfinite(start_s):
             raise ValueError(
-                f"FunctionScaling's callable must return a real number; at "
-                f"time={time} it returned {value!r} ({type(value).__name__}), "
-                f"which is not convertible to float.") from err
+                f"BurstScaling's start must be finite; got {start}.")
 
-        return _validate_scale(value, f"FunctionScaling's callable, at time={time},")
+        if not np.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError(
+                f"BurstScaling's duration must be a finite, positive time; "
+                f"got {duration}.")
+
+        self._start_s = start_s
+        self._duration_s = duration_s
+        self._amplitude = _validate_scale(float(amplitude),
+                                          "BurstScaling's amplitude")
+
+    @property
+    def start(self):
+        """
+        `astropy.units.Quantity`: the time the burst switches on, in
+        seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._start_s * u.s
+
+    @property
+    def duration(self):
+        """
+        `astropy.units.Quantity`: how long the burst lasts, in seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._duration_s * u.s
+
+    @property
+    def amplitude(self):
+        """
+        float: the scale factor while the burst lasts.
+
+        Returns
+        -------
+        float
+        """
+        return self._amplitude
+
+    def __call__(self, time):
+        """
+        The scale factor at `time`: `self.amplitude` inside the half-open
+        window `start <= time < start + duration`, `0.0` outside it.
+
+        Parameters
+        ----------
+        time : `astropy.units.Quantity`
+            The time to evaluate (time units). Scalar.
+
+        Returns
+        -------
+        float
+            `self.amplitude` or `0.0`. Both were checked finite and
+            non-negative at construction, so there is nothing left to
+            validate here.
+        """
+
+        t = time.to_value(u.s)
+
+        if self._start_s <= t < self._start_s + self._duration_s:
+            return self._amplitude
+
+        return 0.0
+
+
+class SinusoidalScaling(SourceScaling):
+    """
+    A scaling that oscillates smoothly about a mean:
+
+        `mean + amplitude * sin(2 * pi * (t - reference_time) / period)`
+
+    so it runs between `mean - amplitude` and `mean + amplitude`, once
+    every `period`, and equals `mean` (and is rising) at
+    `reference_time`. This is the shape a periodic modulation has in a
+    teaching run -- a source brightening and dimming once per orbit.
+
+    `amplitude` may not exceed `mean`: see `__init__`.
+    """
+
+    def __init__(self, mean, amplitude, period, reference_time = 0 * u.s):
+        """
+        Parameters
+        ----------
+        mean : float
+            The scale factor the oscillation is centred on. Must be a
+            finite, non-negative number.
+        amplitude : float
+            How far the scale factor swings either side of `mean`. Must be
+            a finite, non-negative number, and no larger than `mean`.
+        period : `astropy.units.Quantity`
+            The **full** period of the oscillation (time units), not an
+            angular frequency: one whole cycle takes exactly this long, so
+            a caller who wants a scaling that repeats once per 5400-second
+            orbit writes `5400 * u.s` and never has to get a factor of
+            `2 * pi` right. Must be positive.
+        reference_time : `astropy.units.Quantity`
+            The time the sine is zero and rising, i.e. the phase origin
+            (time units). Defaults to `0 * u.s`.
+
+        Raises
+        ------
+        ValueError
+            If `mean` or `amplitude` is not finite and non-negative, if
+            `period` is not positive, if `reference_time` is not finite,
+            or if `amplitude` is greater than `mean`.
+
+            The last one is the interesting check. With
+            `amplitude > mean` the sine dips below zero for part of every
+            cycle, which is a negative scaling, which is a negative
+            Poisson mean deep inside `InertialSimulator.run_events` --
+            precisely the failure `_validate_scale` exists to prevent, and
+            precisely as far from its cause. The oscillation is negative
+            *by construction* there, not by accident at one time, so the
+            honest place to say so is here, where the two numbers that
+            disagree are both in hand.
+        """
+
+        period_s = float(period.to_value(u.s))
+        reference_time_s = float(reference_time.to_value(u.s))
+
+        mean = _validate_scale(float(mean), "SinusoidalScaling's mean")
+        amplitude = _validate_scale(float(amplitude),
+                                    "SinusoidalScaling's amplitude")
+
+        if not np.isfinite(period_s) or period_s <= 0:
+            raise ValueError(
+                f"SinusoidalScaling's period must be a finite, positive time; "
+                f"got {period}.")
+
+        if not np.isfinite(reference_time_s):
+            raise ValueError(
+                f"SinusoidalScaling's reference_time must be finite; got "
+                f"{reference_time}.")
+
+        if amplitude > mean:
+            raise ValueError(
+                f"SinusoidalScaling's amplitude ({amplitude}) must not exceed "
+                f"its mean ({mean}); otherwise the scaling is negative for "
+                f"part of every cycle, which is a negative Poisson mean in "
+                f"the simulator.")
+
+        self._mean = mean
+        self._amplitude = amplitude
+        self._period_s = period_s
+        self._reference_time_s = reference_time_s
+
+    @property
+    def mean(self):
+        """
+        float: the scale factor the oscillation is centred on.
+
+        Returns
+        -------
+        float
+        """
+        return self._mean
+
+    @property
+    def amplitude(self):
+        """
+        float: how far the scale factor swings either side of `mean`.
+
+        Returns
+        -------
+        float
+        """
+        return self._amplitude
+
+    @property
+    def period(self):
+        """
+        `astropy.units.Quantity`: the full period of the oscillation, in
+        seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._period_s * u.s
+
+    @property
+    def reference_time(self):
+        """
+        `astropy.units.Quantity`: the phase origin, in seconds.
+
+        Returns
+        -------
+        `astropy.units.Quantity`
+        """
+        return self._reference_time_s * u.s
+
+    def __call__(self, time):
+        """
+        The scale factor at `time` (see the class docstring for the
+        formula).
+
+        Parameters
+        ----------
+        time : `astropy.units.Quantity`
+            The time to evaluate (time units). Scalar.
+
+        Returns
+        -------
+        float
+            A value between `mean - amplitude` and `mean + amplitude`.
+            `__init__` already guarantees the lower end of that range is
+            non-negative, so, as with the other scalings, the value is not
+            re-checked on every call.
+        """
+
+        t = time.to_value(u.s)
+
+        phase = 2 * np.pi * (t - self._reference_time_s) / self._period_s
+
+        return float(self._mean + self._amplitude * np.sin(phase))
+
+
+# ---------------------------------------------------------------------------
+# What a configuration may call each of these classes.
+#
+# Both tables sit at the bottom of the file because the second one names the
+# classes above: `SourceScaling.from_config` looks them up when it runs, long
+# after this module has finished importing.
+# ---------------------------------------------------------------------------
+
+
+#: Accepted spellings of every scaling type, mapped to the canonical one.
+_SCALING_TYPES = {'Constant': 'Constant',
+                  'ConstantScaling': 'Constant',
+                  'Tabulated': 'Tabulated',
+                  'TabulatedScaling': 'Tabulated',
+                  'Burst': 'Burst',
+                  'BurstScaling': 'Burst',
+                  'Sinusoidal': 'Sinusoidal',
+                  'SinusoidalScaling': 'Sinusoidal'}
+
+#: The class each canonical scaling type builds.
+_SCALING_CLASSES = {'Constant': ConstantScaling,
+                    'Tabulated': TabulatedScaling,
+                    'Burst': BurstScaling,
+                    'Sinusoidal': SinusoidalScaling}

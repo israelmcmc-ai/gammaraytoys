@@ -56,6 +56,88 @@ class Simulator(SimulatorBase):
         self.nsim = 0
         self.ntrig = 0
 
+    @classmethod
+    def from_config(cls, config):
+        """
+        Build a `Simulator` from a YAML configuration (Section 7 of the
+        plan).
+
+        The configuration is either a path to a YAML file or an
+        already-parsed mapping, and every call builds its own fresh
+        objects: two simulators built from the same configuration share no
+        source, no spectrum and no scaling. That matters -- a `PointSource`
+        given a `sky_angle` re-aims itself on every draw, so handing one
+        source to two runs would let them interfere.
+
+        The schema is documented in `gammaraytoys.sims.config`, and each
+        piece of it is read and written by the class it describes -- a
+        `from_config` classmethod and a `to_config` method on `Source`,
+        `Spectrum`, `SourceScaling` and the rest. Unknown keys are an error
+        at every level, and a malformed unit raises naming the key it came
+        from.
+
+        A detector-frame run has no spacecraft, so a configuration holding
+        a `spacecraft_history` is refused here rather than silently
+        ignored: that one belongs to `InertialSimulator.from_config`. An
+        `earth` block is still accepted, for a source that emits from one.
+
+        Parameters
+        ----------
+        config : str, path-like or mapping
+            The configuration: a path to a YAML file, or an already-parsed
+            mapping. The mapping is never modified.
+
+        Returns
+        -------
+        Simulator
+            The simulator, with `source_names` and `random_seed` set from
+            the configuration. When a `random_seed` was given, numpy's
+            global generator is seeded with it as the very last thing this
+            does, so that the run that follows is reproducible.
+
+        Raises
+        ------
+        ValueError
+            On an unknown or missing key, a value that is not a quantity or
+            has the wrong unit, or anything the simulator and its parts
+            reject at construction.
+        TypeError
+            If `config` is neither a path nor a mapping.
+        """
+
+        return cls._from_config(config, inertial = False)
+
+    def to_config(self):
+        """
+        Write this simulator back out as a configuration.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A configuration `from_config` reads back into an equal
+            simulator, holding only plain strings, numbers, lists and
+            dictionaries, so `yaml.safe_dump` can write it straight out.
+            It is *canonical*: keys left at their default are omitted and
+            aliases are resolved, so it may be spelled differently from the
+            configuration this simulator was built from while describing
+            exactly the same run.
+
+        Raises
+        ------
+        ValueError
+            If any part of this simulator is not something a configuration
+            can describe -- a detector whose material was built from a
+            table rather than by name, a source type a configuration cannot
+            name, or a scaling that is not one of the four a configuration
+            can name.
+        """
+
+        return self._to_config()
+
     def _standardize_termination(self, nsim = None, ntrig = None, duration = None):
         """
         Convert whichever single finishing condition was given

@@ -2,6 +2,9 @@ from abc import ABC, abstractmethod
 import numpy as np
 import astropy.units as u
 
+from ..config_utils import (_as_mapping, _check_keys, _dispatch_type_name,
+                            _format_quantity, _quantity)
+
 
 class ObservationStrategy(ABC):
     """
@@ -36,6 +39,138 @@ class ObservationStrategy(ABC):
         """
 
         pass
+
+    @classmethod
+    def from_config(cls, config, where = 'observation_strategy', earth = None):
+        """
+        Build an `ObservationStrategy` from its configuration block.
+
+        ```yaml
+        {type: ZenithPointing}
+        {type: NadirPointing}
+        {type: InertialPointing, attitude: 30 deg}
+        {type: SpinPointing, rate: 0.1 deg/s, initial_attitude: 0 deg}
+        {type: TargetedPointing, sky_angle: 45 deg}
+        ```
+
+        Called on `ObservationStrategy`, the block's `type` chooses the class.
+        Called on one of the five concrete classes, that class is what gets
+        built: `type` may name it or be left out, and naming a different one
+        raises rather than quietly handing back the other class.
+
+        Parameters
+        ----------
+        config : mapping
+            The `observation_strategy` block.
+        where : str
+            Label for this block in error messages.
+        earth : `Earth` or None
+            The Earth a `TargetedPointing` decides occultation against.
+            Required for that strategy and refused as `None`: it is the one
+            strategy whose whole job is deciding when the target is behind the
+            Earth, and letting it build its own would be exactly the
+            two-different-planets bug this codebase has already shipped once.
+
+        Returns
+        -------
+        `ObservationStrategy`
+
+        Raises
+        ------
+        ValueError
+            On an unknown type or key, a missing required key, a bad quantity,
+            or a `TargetedPointing` with no Earth to point around.
+        """
+
+        block = _as_mapping(config, where)
+        name = _dispatch_type_name(cls, ObservationStrategy, block, where,
+                                   _STRATEGY_TYPES, _STRATEGY_CLASSES,
+                                   'observation strategy')
+
+        if name == 'ZenithPointing':
+            _check_keys(block, where, ('type',))
+            return ZenithPointing()
+
+        if name == 'NadirPointing':
+            _check_keys(block, where, ('type',))
+            return NadirPointing()
+
+        if name == 'InertialPointing':
+            _check_keys(block, where, ('type', 'attitude'), required = ('attitude',))
+            return InertialPointing(
+                attitude = _quantity(block, 'attitude', where, u.deg, required = True))
+
+        if name == 'SpinPointing':
+            _check_keys(block, where, ('type', 'rate', 'initial_attitude'),
+                        required = ('rate',))
+            return SpinPointing(
+                rate = _quantity(block, 'rate', where, u.deg / u.s, required = True),
+                initial_attitude = _quantity(block, 'initial_attitude', where, u.deg,
+                                             default = 0 * u.deg))
+
+        _check_keys(block, where, ('type', 'sky_angle'), required = ('sky_angle',))
+
+        if earth is None:
+            raise ValueError(
+                f"{where}: a TargetedPointing needs the Earth it decides "
+                f"occultation against, and must not build its own -- pass the "
+                f"run's Earth (the top-level loader always does).")
+
+        return TargetedPointing(
+            sky_angle = _quantity(block, 'sky_angle', where, u.deg, required = True),
+            earth = earth)
+    def to_config(self):
+        """
+        Write this observation strategy back out as a configuration block.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        dict
+            A block `ObservationStrategy.from_config` reads back into an equal
+            strategy. A `TargetedPointing`'s Earth is not written here: a
+            configuration has exactly one `earth` block, and the loader hands
+            it to this strategy.
+
+        Raises
+        ------
+        ValueError
+            If this is not one of the five types a configuration can name.
+            Anything else that subclasses `ObservationStrategy` lands here,
+            which is the only honest answer -- a configuration has no `type`
+            name for it.
+        """
+
+        if isinstance(self, ZenithPointing):
+            return {'type': 'ZenithPointing'}
+
+        if isinstance(self, NadirPointing):
+            return {'type': 'NadirPointing'}
+
+        if isinstance(self, InertialPointing):
+            return {'type': 'InertialPointing',
+                    'attitude': _format_quantity(self.attitude)}
+
+        if isinstance(self, SpinPointing):
+            block = {'type': 'SpinPointing',
+                     'rate': _format_quantity(self.rate)}
+
+            if self.initial_attitude != 0 * u.deg:
+                block['initial_attitude'] = _format_quantity(self.initial_attitude)
+
+            return block
+
+        if isinstance(self, TargetedPointing):
+            return {'type': 'TargetedPointing',
+                    'sky_angle': _format_quantity(self.sky_angle)}
+
+        raise ValueError(
+            f"{type(self).__name__} is not an observation strategy a "
+            f"configuration can describe; the types that are: "
+            f"{sorted(set(_STRATEGY_TYPES.values()))}.")
 
 
 class ZenithPointing(ObservationStrategy):
@@ -275,3 +410,27 @@ class TargetedPointing(ObservationStrategy):
         attitude_deg = np.where(occulted, orbit_angle_deg, sky_angle_deg)
 
         return attitude_deg * u.deg
+
+
+# ---------------------------------------------------------------------------
+# What a configuration may call each of these classes.
+#
+# Both tables sit at the bottom of the file because the second one names the
+# classes above: `ObservationStrategy.from_config` looks them up when it
+# runs, long after this module has finished importing.
+# ---------------------------------------------------------------------------
+
+
+#: Accepted spellings of every observation strategy type.
+_STRATEGY_TYPES = {'ZenithPointing': 'ZenithPointing',
+                   'NadirPointing': 'NadirPointing',
+                   'InertialPointing': 'InertialPointing',
+                   'SpinPointing': 'SpinPointing',
+                   'TargetedPointing': 'TargetedPointing'}
+
+#: The class each canonical observation strategy type builds.
+_STRATEGY_CLASSES = {'ZenithPointing': ZenithPointing,
+                     'NadirPointing': NadirPointing,
+                     'InertialPointing': InertialPointing,
+                     'SpinPointing': SpinPointing,
+                     'TargetedPointing': TargetedPointing}

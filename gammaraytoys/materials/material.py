@@ -7,9 +7,27 @@ from matplotlib import pyplot as plt
 
 class Material:
 
-    def __init__(self, density, attenuation):
+    def __init__(self, density, attenuation, name = None):
+        """
+        Parameters
+        ----------
+        density : `astropy.units.Quantity`
+            Mass density of the material.
+        attenuation : `pandas.DataFrame`
+            Attenuation coefficients, with columns `energy`, `photo`,
+            `compton` and `pair`, and the units of the first and the rest
+            in `attrs['energy_unit']` and `attrs['att_coeff_unit']`.
+        name : str or None
+            The name this material is known by (`'Ge'`, `'Si'`, ...), set
+            by `from_name`. `None` for a material built directly from a
+            table, which then has no name to write into a configuration
+            file. Carrying it costs nothing and is the only way a detector
+            can be written back out as one.
+        """
 
         self.density = density
+
+        self.name = name
         
         self._att_coeff = attenuation
         self._energy_unit = attenuation.attrs['energy_unit']
@@ -56,7 +74,7 @@ class Material:
         att.attrs['energy_unit'] = u.MeV
         att.attrs['att_coeff_unit'] = u.cm*u.cm/u.g
         
-        return cls(density, att)
+        return cls(density, att, name = name)
 
     def photo_attenuation(self, energy):
 
