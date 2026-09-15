@@ -32,7 +32,9 @@ package. Don't go looking for a `COSIta` class, and don't invent one without ask
   `layer_thickness = 1 cm`, `energy_resolution = 0.03`.
 
 "cosimita" is neither -- it is the name of the *simulation project* whose plan is
-`docs/dev/inertial_sim_plan.md` (complete; history in `.claude/cosimita-progress.md`).
+`docs/dev/inertial_sim_plan.md` (complete). Its coordination file was removed once the
+project closed; `git log --diff-filter=D -- .claude/cosimita-progress.md` finds the
+commit that deleted it if the evidence behind any rule here is ever wanted.
 
 ## Reconstructors
 

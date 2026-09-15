@@ -487,9 +487,9 @@ def test_random_photon_direction_matches_a_hand_computed_value_at_a_known_pose()
     # EXACT inverse of the `Nu = A - lambda` transform `random_photon` just
     # applied via `sky_angle_to_offaxis`. Composing a transform with its own
     # inverse cancels any error in how `attitude` (or `orbit_angle`) is
-    # used identically on both sides -- the PR 4 lesson recorded in
-    # `.claude/cosimita-progress.md` ("a test helper must not invert the
-    # transform under test"). This test instead reads `photon.direction`
+    # used identically on both sides -- the lesson recorded in `CLAUDE.md`
+    # ("a test helper must not invert the transform under test"), which came
+    # out of PR 4. This test instead reads `photon.direction`
     # directly and compares it to a value computed by hand from Section
     # 3.4's stated conventions ("a source at off-axis angle Nu lies along
     # (sin Nu, cos Nu) while the photon it emits flies along 270 deg - Nu"),

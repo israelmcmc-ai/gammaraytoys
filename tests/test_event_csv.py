@@ -356,9 +356,9 @@ def _draw_events(source, detector, history, earth, n_per_interval=60):
     An earlier version of this helper pinned every timestamp to
     `interval.mid_time`, which is always safely inside `[start_time,
     stop_time)` and so never exercises `_attitude_at`'s interval-boundary
-    search at all -- exactly the PR 5 lesson recorded in
-    `.claude/cosimita-progress.md`: "isolating one effect can delete the
-    effect you meant to test." Drawing uniformly means a photon can land
+    search at all -- exactly the lesson recorded in `CLAUDE.md`: "isolating
+    one effect can delete the effect you meant to test." Drawing uniformly
+    means a photon can land
     arbitrarily close to either boundary of its interval, which is where a
     wrong `searchsorted` side or a missing clamp actually shows up.
 
