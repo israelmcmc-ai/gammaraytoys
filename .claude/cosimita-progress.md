@@ -1,10 +1,30 @@
-# cosimita implementation — coordination state
+# cosimita implementation — coordination state (CLOSED)
 
-Live status of the work described in `docs/dev/inertial_sim_plan.md`. Updated by the
-orchestrating session as each PR moves. If you are a fresh session picking this up,
-read the plan first, then this file.
+Historical record of the work described in `docs/dev/inertial_sim_plan.md`, which is
+**complete**: all seven PRs merged, the last on 2026-09-15.
+
+**This file is no longer the live process doc. `CLAUDE.md` at the repo root is.**
+The durable rules that came out of this project -- physics conventions, API traps,
+testing discipline, notebook and environment traps, the deliberate quirks not to
+"fix" -- have been lifted into `CLAUDE.md`, which loads automatically. Read that
+first. Nothing here overrides it; where the two disagree, `CLAUDE.md` is current.
+
+What this file is still good for is the *evidence behind* those rules: what was
+measured, what broke, and why a decision went the way it did. Several sections below
+are dated snapshots of work in progress ("Queued for the PR 1 follow-up pass",
+"Carried into PR 3", "Known issues") and describe states that no longer exist --
+they are kept as history, not as instructions. The "Open questions for the
+maintainer" are from PR 2 and may have been settled in review since; don't treat
+them as still open without checking.
 
 ## Cadence
+
+> **Superseded.** The three-role split below is what *this* project ran. The current
+> process is **two agents** -- the main agent plans, tests and reviews; a cheaper
+> model implements -- as recorded in `CLAUDE.md`. The rules that carried over are
+> that agents never merge, never open PRs and never force-push, the orchestrator
+> opens PRs after its own verification, and the maintainer reviews and merges
+> everything. The table is kept because the lessons below refer to these roles.
 
 **Strictly one PR at a time**, in the order below. Each PR is reviewed and merged by
 the maintainer before the next begins. The maintainer reviews every PR; agents never
