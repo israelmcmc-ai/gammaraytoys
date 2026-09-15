@@ -34,6 +34,13 @@ mutation-testing the new tests by injecting deliberate bugs.
 
 ## Status
 
+**The plan is complete.** All seven PRs are merged as of 2026-09-15 (PR #21, merge
+commit `9a4f20a`). Nothing in the cosimita plan is outstanding. What remains below is
+kept as the record of how it was built and what was learned; a fresh session picking
+this up should read the "Lessons" sections before changing the simulator or its
+configuration schema, and the "Decisions already taken" section before re-litigating
+anything there.
+
 | PR | Scope | Branch | State |
 |---|---|---|---|
 | 1 | Source hierarchy + `simulated_rate()` | merged | **Merged** (PR #13) |
@@ -42,7 +49,7 @@ mutation-testing the new tests by injecting deliberate bugs.
 | 4 | `NearPointSource`, `ExtendedSource` | merged | **Merged** (PR #17) |
 | 5 | `EarthAlbedoSource` | merged | **Merged** (PR #19) |
 | 6 | Time-dependent scaling + event CSV I/O | merged | **Merged** (PR #20) |
-| 7 | YAML configuration | `claude/cosimita-pr7-yaml-config` | **Open (PR #21)** — maintainer review addressed: expression evaluator removed entirely, `*_from_config` moved onto the classes. 570 tests green. |
+| 7 | YAML configuration | merged | **Merged** (PR #21) — three review rounds: expression evaluator removed entirely, `*_from_config` moved onto the classes, Python floor raised to 3.12 with `astropy>=8.0` pinned. 570 tests green. |
 
 Side PRs, outside the seven:
 
@@ -448,9 +455,30 @@ backend and silently strips every figure while still exiting 0.
   inside `run_events` -- the same failure the review found for a negative `flux`.
 - **CI's version matrix catches what one venv cannot.** The schema's array-with-unit
   string silently required a newer astropy than `pyproject.toml` asks for: 39 tests
-  failed on Python 3.10 only. Fixed by parsing the bracket by hand. When a project
-  supports a version range with unpinned deps, a local green suite proves one point
-  in that space.
+  failed on Python 3.10 only. When a project supports a version range with unpinned
+  deps, a local green suite proves one point in that space. First fixed by parsing
+  the bracket by hand; **superseded in the third review round** -- see below.
+- **A language-version floor does not imply a library floor.** The maintainer asked
+  for Python >= 3.12 so the hand-rolled bracket parser could go. Measured, that alone
+  was not enough: `u.Quantity("[0, 5, 10] mm")` fails on astropy 6.1.7 and every 7.x,
+  and those install happily on 3.12 -- the same 39 failures, on a newer interpreter.
+  8.0.0 is the first release that parses it, so `astropy>=8.0` is the real
+  requirement and is what makes deleting the workaround sound. When a request is
+  phrased as "raise the version so X can go", check which dependency actually
+  gates X before deleting anything.
+- **Keep more than one version in the matrix.** After the bump the matrix is
+  `["3.12", "3.13"]`, not a single pin: a matrix spanning a range is the thing that
+  caught this bug in the first place, and it costs one runner to keep that property.
+- **Diff the old and new implementations before deleting a parser.** 36 inputs through
+  both: every valid form identical (`"[5] mm"` still a one-element array), all 12
+  differences confined to malformed or exotic input. Two were worth reporting rather
+  than burying -- `"[1 2] mm"` is now accepted (a genuine loosening), and `"[inf] mm"`
+  now parses and is caught one step later by the finiteness check instead.
+- **Stale `.pyc` hides `SyntaxWarning`.** A cached-bytecode run reported "no warnings";
+  cold, the suite shows 5 pre-existing `invalid escape sequence` warnings
+  (`materials/material.py:68,72`, `tracker_2d.py:317`, `fast_norm_fit.py:8,145`).
+  They are compile-time, so only a cold run sees them. Clear `__pycache__` before
+  quoting a warning count.
 - **A stale PR description misleads the review.** #21's body twice said a thing was
   "not fixed" that had been fixed at the maintainer's request, and omitted the
   portability fix entirely. Rewrite the body when the branch moves, not just when
